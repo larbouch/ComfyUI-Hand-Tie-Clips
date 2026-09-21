@@ -686,14 +686,17 @@ The turbo stack in the shipped workflows is
 ## Docs
 
 [`CHANGELOG.md`](CHANGELOG.md) is what 2.2.0 contains, written for users.
-[`PROMPTING.md`](PROMPTING.md) is the authoring guide. Both ship with the pack.
+[`PROMPTING.md`](PROMPTING.md) is the authoring guide.
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the internals, for anyone
+changing the node. All three ship with the pack.
 
 The rest are in the repository only — the published package excludes them, so
 they are not in your `custom_nodes` folder and these links leave for GitHub.
-[`docs/DEVLOG.md`](https://github.com/dntpi/ComfyUI-Hand-Tie-Clips/blob/main/docs/DEVLOG.md)
-is the engineering log. `docs/HANDOVER_*.md`, root `HANDOVER.md` and
-`BETA_NOTES.md` are historical session notes — do not take them as the state of
-this release.
+[`docs/DEVLOG.md`](https://github.com/dntpi/ComfyUI-Hand-Tie-Clips/blob/main/docs/DEVLOG.md) is the
+engineering log and [`docs/LEVER_AUDIT.md`](https://github.com/dntpi/ComfyUI-Hand-Tie-Clips/blob/main/docs/LEVER_AUDIT.md)
+the lever sweeps behind it. `docs/GROK_V2_HANDBACK.md`,
+`docs/GROK_V2_GPU_TESTS.md`, `docs/POST_V2.md` and `BETA_NOTES.md` are
+historical session notes — do not take them as the state of this release.
 
 ---
 
