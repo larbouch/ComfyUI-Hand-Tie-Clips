@@ -45,6 +45,24 @@ FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
 # refined over the 22 frames after it.
 DEFAULT_RAMP = "0:0, 22:0, 44:1"
 
+# How far past the pin the crossover runs, in pixel frames. The HOLD is
+# overlap-coupled by definition -- it is the pin -- but nothing measured says
+# the crossover should scale with it, so it stays the published 22 and only the
+# hold moves. At overlap 22 that reproduces DEFAULT_RAMP exactly.
+CROSS_FRAMES = 22
+
+# `refine_blend=auto`. The literal 22 in DEFAULT_RAMP is this run's `overlap`,
+# and the two were only ever equal because 0.9 s is the default overlap: at
+# 0.2 s (5 f) the published ramp holds 17 frames raw that were refined and paid
+# for, and at 1.6 s (39 f) it crosses to fully refined at f44 while the pin runs
+# to f39, so f22-f39 ship refined inside the pinned head -- which is the exact
+# seam cost the ramp exists to remove, reintroduced silently.
+#
+# Resolved to a literal BEFORE the hop key is built, so `auto` at a 22 f overlap
+# keys byte-identically to a workflow carrying the published string and every
+# cached hop still hits.
+AUTO = "auto"
+
 INTERP = ("linear", "smooth", "step")
 
 _KEY = re.compile(r"^\s*(-?\d+)\s*:\s*(-?\d*\.?\d+)\s*$")
@@ -83,6 +101,23 @@ def whole_steps_for_frames(n):
         return None
     s = step_for_frame(n)
     return int(round(s)) if abs(s - round(s)) < 1e-9 else None
+
+
+def auto_ramp(overlap):
+    """The published ramp shape, re-derived for THIS run's overlap. -> str."""
+    o = max(0, int(overlap))
+    return f"0:0, {o}:0, {o + CROSS_FRAMES}:1"
+
+
+def resolve(text, overlap):
+    """`auto` -> the literal ramp for `overlap`. Anything else, untouched.
+
+    Called before `parse` and before the hop key, so the key never sees the
+    word and the console can print what auto meant.
+    """
+    if str(text or "").strip().lower() == AUTO:
+        return auto_ramp(overlap)
+    return text
 
 
 def parse(text):

@@ -354,7 +354,22 @@ def validate(shot_text, ref_text, *, hops=None, known_files=None, pinned=None,
                    "invents something for the seconds left over."
                    if words < w0 else
                    "Written long, the action is truncated mid-way."))
-        if spoken < l0:
+        # SYSTEM_PROMPT's wordless-hop rule: zero spoken lines plus a named
+        # narrowband sound bed is a legitimate beat, not an underwritten one --
+        # "the spoken-lines column of the table does not apply". The prompt has
+        # taught that since the rule went in and only this check never learned
+        # it, so a quiet hop written exactly as asked still linted. Under
+        # `master_audio_file` that was worse than noise: the mouth is driven by
+        # a frozen take, the beat is supposed to carry no quoted line, and the
+        # speech repair turn spent an attempt pushing invented dialogue into it
+        # -- the "unmatched text can pull the mouth off the take" failure, from
+        # the lint that exists to prevent invented dialogue.
+        #
+        # The sound bed is the whole condition. Zero lines and NO bed is still
+        # the real defect, because that is the shape H3 fills with speech.
+        wordless = spoken == 0 and bool(
+            _SOUND.search(str((sh or {}).get("beat") or "")))
+        if spoken < l0 and not wordless:
             warnings.append(
                 f"shot {i + 1}: {spoken} spoken line(s); the {label} row wants "
                 f"{l0}" + (f"-{l1}" if l1 > l0 else "") + ". The line count is "
@@ -1210,6 +1225,44 @@ def _subjects_repair(errors):
     )
 
 
+# Warnings worth spending an attempt on. `errors` means "the node would
+# reject this" and the speech lints deliberately are not errors -- a short
+# beat renders perfectly happily. But it renders with seconds of a visibly
+# speaking character unassigned, which the renderer fills with dialogue
+# nobody wrote, so the loudest lint in the pack was the one thing the repair
+# loop never mentioned. Matched on substrings rather than re-deriving the
+# counts: the warning text already says the whole thing, in the node's own
+# words, per shot.
+_SPEECH_WARN = ("spoken line(s)",
+                "spoken lines run about",
+                "the beat is ",
+                "words of action run before")
+
+
+def _speech_warnings(warns):
+    return [str(w) for w in (warns or [])
+            if any(k in str(w) for k in _SPEECH_WARN)]
+
+
+def _speech_repair(warns):
+    return (
+        "That plan is accepted -- do not restructure it. Keep every shot, its "
+        "id, its directives, its @tags and its files exactly as they are, and "
+        "re-emit the ref_plan unchanged.\n\n"
+        "The beats below are underwritten. A hop whose spoken lines do not "
+        "fill its seconds leaves a character who is visibly mid-sentence with "
+        "no audio assigned, and those seconds come back as dialogue nobody "
+        "wrote.\n\n"
+        "Rewrite ONLY the `beat` text of the shots named. Speech runs about "
+        f"{SPEECH_WPS} words a second, so a character talking through most of "
+        "a 10 s hop needs roughly 25 words INSIDE the quotes -- several "
+        "sentences, not one. Count the words between the quote marks in every "
+        "beat you touch before you answer. If a hop is meant to be quiet, say "
+        "so: name the sound the room makes instead.\n\n"
+        + "\n".join(f"- {w}" for w in warns)
+    )
+
+
 def _stub_missing_subjects(ref_text):
     """Last resort: name/locked/context/desc so a usable draft is not thrown
     away because the model left the prose boxes empty."""
@@ -1284,6 +1337,10 @@ async def write_plan(brief, hops, *, complete_fn, files=None,
 
     last_errors, warnings = [], []
     shot_text = ref_text = ""
+    # A plan that already validated, held while one extra attempt goes on the
+    # speech lint. Never traded for a worse answer than the one it replaces.
+    accepted = None
+    speech_spent = False
 
     for attempt in range(1, int(attempts) + 1):
         if on_step:
@@ -1331,8 +1388,38 @@ async def write_plan(brief, hops, *, complete_fn, files=None,
                 shot_text, ref_text, hops=hops, known_files=files,
                 pinned=pinned, duration=duration)
         if not last_errors:
-            return {"ok": True, "shot_plan": shot_text, "ref_plan": ref_text,
-                    "attempts": attempt, "errors": [], "warnings": warnings}
+            speech = _speech_warnings(warnings)
+            if accepted is None or len(speech) < len(accepted[3]):
+                accepted = (shot_text, ref_text, warnings, speech)
+            # One round, never a loop. The lint is advisory by design, and
+            # spending the whole budget on it would trade a plan the node
+            # accepts for an argument about beat length.
+            if accepted[3] and not speech_spent and attempt < int(attempts):
+                speech_spent = True
+                print(f"[{TAG}] plan accepted with {len(accepted[3])} "
+                      f"speech lint(s); spending attempt "
+                      f"{attempt + 1}/{attempts} rewriting the beats",
+                      flush=True)
+                messages.append({"role": "assistant", "content": reply})
+                messages.append({"role": "user",
+                                 "content": validator_turn(
+                                     _speech_repair(accepted[3]))})
+                turn_sch = sch
+                continue
+            return {"ok": True, "shot_plan": accepted[0],
+                    "ref_plan": accepted[1], "attempts": attempt,
+                    "errors": [], "warnings": accepted[2]}
+
+        if accepted is not None:
+            # The speech round answered with something the node would reject.
+            # The plan we already hold is good; keep it rather than spend the
+            # rest of the budget arguing about a warning.
+            print(f"[{TAG}] speech repair came back rejected: "
+                  + "; ".join(last_errors[:2])
+                  + " -- keeping the accepted plan", flush=True)
+            return {"ok": True, "shot_plan": accepted[0],
+                    "ref_plan": accepted[1], "attempts": attempt,
+                    "errors": [], "warnings": accepted[2]}
 
         print(f"[{TAG}] plan attempt {attempt}/{attempts} rejected: "
               + "; ".join(last_errors[:3]), flush=True)

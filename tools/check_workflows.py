@@ -38,8 +38,16 @@ DEPS = {"LTX_lora_loader": "ComfyUI-PlagueKind-Nodes",
 # The MODEL wire, in order, from the loader to the chain.
 # H3 Cache is last before the chain: the clone the sampler sees should be the
 # one every other patch has already been applied to.
-MODEL_PATH = ["UNETLoader", "LTX_lora_loader", "H3AdaLNLoRAFix",
-              "MiniMaxLowVRAMAttention", "H3SLAAttention",
+#
+# SLA moved to the FRONT 2026-09-20, on PlagueKind's recommendation and against
+# the previous note here, which read SLA's own docs as "put it last". It now
+# sits between the loader and the LoRA stack, so every later patch -- LoRA
+# weights included -- is applied on top of the attention override rather than
+# under it. Changing this reorders the keys `_model_fingerprint` hashes, so the
+# first run after the change re-renders every hop. That is the fingerprint
+# working, not a bug.
+MODEL_PATH = ["UNETLoader", "H3SLAAttention", "LTX_lora_loader",
+              "H3AdaLNLoRAFix", "MiniMaxLowVRAMAttention",
               "ModelPreviewOverrideKJ", "HTCH3Cache", "HandTieClips"]
 # CLIP must reach the chain THROUGH the LoRA loader, or the text half of every
 # LoRA is silently dropped -- a wire that looks fine and costs you the LoRA.

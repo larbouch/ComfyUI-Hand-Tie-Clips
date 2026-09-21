@@ -639,10 +639,12 @@
         "simple",
         "base",
         "freeze",
-        "0:0, 22:0, 44:1",
+        "auto",
         "linear",
         "refine",
-        "regular"
+        "regular",
+        0.0,
+        "denoise"
       ],
       "title": "H3 Ref2VA Chain - starter"
     },
@@ -1085,7 +1087,7 @@
         "htc_card": "refs"
       },
       "widgets_values": [
-        "## References and @tags\n\nA picture in the register does not make the model use it. **The beat is what\ndrives the frame** -- write the tag into the action line.\n\nPhrase a place as a place that is *depicted*, not as a container to be placed\ninside: \"at the counter in `@kitchen`\", not \"steps into `@kitchen`\".\n\n### Fields\n\n| field | what it does |\n|---|---|\n| `tag` | what you write in beats as `@tag` |\n| `file` | a bare filename in `input/h3_refs` |\n| `subject` | groups pictures **of the same person** |\n| `retention` | `fully_preserved` / `partially_copy` / `reference` |\n| `shots` | the 1-based hops this picture rides |\n\n**One subject number per person.** Two different people under one number makes\nthe model render the average of their faces.\n\n### `shots` is the part that decides continuity\n\n**A reference with no `shots` list rides hop 1 only.** Right for a **place**\nplate: a room still riding a hop set somewhere else beats the frame pin, and the\nmodel follows the still. **List every hop a picture belongs on.**\n\n**A face plate is the opposite \u2014 put it on every hop.** A hop scheduled with no\nface reference came back a different person, and no later hop recovered.\nIdentity drift does not self-correct.\n\n- Every **face** ref gets every hop: `\"shots\": [1, 2, 3, 4, 5, 6]`.\n- Keep a **place** ref on the hops set in that place, and off the rest.\n\n### Or decide it from the shot instead\n\nA shot can name its own stills, which overrides every `shots` list for that\none hop:\n\n```json\n{\"beat\": \"...\", \"refs\": [\"hero_face\", \"kitchen\"]}\n```\n\nOmit the field for the register's own scheduling. `[]` is **no stills at\nall** -- which is what a `restart` hop usually wants, so the photograph\nsupplies the room rather than putting a portrait back in front of it.\nUnknown tags fail on the queue, not mid-render.\n\n### `locked` and `context`\n\nPer-subject prose that rides **every hop**, with no picture citation, so it\ncarries identity across a hop where the photograph is absent. Give every subject\na `locked`, and a `name` -- from hop 2 on, `@tag` for a person resolves to that\nname.\n\n**Name a colour or it drifts.** A noun with no adjective is unanchored: each hop\nis an independent encode, so \"the bowl\" on hop 4 came back stainless steel. Put\nproperties in `context` -- \"the bowl is white porcelain\" -- never locations, and\nrepeat the adjective in every beat."
+        "## References and @tags\n\nA picture in the register does not make the model use it. **The beat is what\ndrives the frame** -- write the tag into the action line.\n\nPhrase a place as a place that is *depicted*, not as a container to be placed\ninside: \"at the counter in `@kitchen`\", not \"steps into `@kitchen`\".\n\n### Fields\n\n| field | what it does |\n|---|---|\n| `tag` | what you write in beats as `@tag` |\n| `file` | a bare filename in `input/h3_refs` |\n| `subject` | groups pictures **of the same person** |\n| `retention` | `fully_preserved` / `partially_copy` / `reference` |\n| `shots` | the 1-based hops this picture rides |\n\n**One subject number per person.** Two different people under one number makes\nthe model render the average of their faces.\n\n### `shots` is the part that decides continuity\n\n**A reference with no `shots` list rides hop 1 only.** Right for a **place**\nplate: a room still riding a hop set somewhere else beats the frame pin, and the\nmodel follows the still. **List every hop a picture belongs on.**\n\n**A face plate is the opposite — put it on every hop.** A hop scheduled with no\nface reference came back a different person, and no later hop recovered.\nIdentity drift does not self-correct.\n\n- Every **face** ref gets every hop: `\"shots\": [1, 2, 3, 4, 5, 6]`.\n- Keep a **place** ref on the hops set in that place, and off the rest.\n\n### Or decide it from the shot instead\n\nA shot can name its own stills, which overrides every `shots` list for that\none hop:\n\n```json\n{\"beat\": \"...\", \"refs\": [\"hero_face\", \"kitchen\"]}\n```\n\nOmit the field for the register's own scheduling. `[]` is **no stills at\nall** -- which is what a `restart` hop usually wants, so the photograph\nsupplies the room rather than putting a portrait back in front of it.\nUnknown tags fail on the queue, not mid-render.\n\n### `locked` and `context`\n\nPer-subject prose that rides **every hop**, with no picture citation, so it\ncarries identity across a hop where the photograph is absent. Give every subject\na `locked`, and a `name` -- from hop 2 on, `@tag` for a person resolves to that\nname.\n\n**Name a colour or it drifts.** A noun with no adjective is unanchored: each hop\nis an independent encode, so \"the bowl\" on hop 4 came back stainless steel. Put\nproperties in `context` -- \"the bowl is white porcelain\" -- never locations, and\nrepeat the adjective in every beat."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1225,7 +1227,7 @@
       "type": "LTX_lora_loader",
       "pos": [
         520,
-        -40
+        312
       ],
       "size": [
         420,
@@ -1238,7 +1240,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 23
+          "link": 25
         },
         {
           "name": "clip",
@@ -1251,7 +1253,7 @@
           "name": "model",
           "type": "MODEL",
           "links": [
-            25
+            26
           ]
         },
         {
@@ -1278,7 +1280,7 @@
       "type": "H3AdaLNLoRAFix",
       "pos": [
         520,
-        240
+        582
       ],
       "size": [
         340,
@@ -1291,7 +1293,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 25
+          "link": 26
         }
       ],
       "outputs": [
@@ -1299,7 +1301,7 @@
           "name": "MODEL",
           "type": "MODEL",
           "links": [
-            26
+            27
           ]
         }
       ],
@@ -1317,7 +1319,7 @@
       "type": "MiniMaxLowVRAMAttention",
       "pos": [
         520,
-        430
+        762
       ],
       "size": [
         330,
@@ -1330,7 +1332,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 26
+          "link": 27
         }
       ],
       "outputs": [
@@ -1338,7 +1340,7 @@
           "name": "model",
           "type": "MODEL",
           "links": [
-            27
+            28
           ]
         }
       ],
@@ -1356,7 +1358,7 @@
       "type": "H3SLAAttention",
       "pos": [
         520,
-        530
+        -40
       ],
       "size": [
         340,
@@ -1369,7 +1371,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 27
+          "link": 23
         }
       ],
       "outputs": [
@@ -1377,7 +1379,7 @@
           "name": "MODEL",
           "type": "MODEL",
           "links": [
-            28
+            25
           ]
         }
       ],
@@ -1405,7 +1407,7 @@
       "type": "ModelPreviewOverrideKJ",
       "pos": [
         520,
-        900
+        850
       ],
       "size": [
         360,
@@ -1455,7 +1457,7 @@
       "type": "HTCH3Cache",
       "pos": [
         520,
-        1420
+        1360
       ],
       "size": [
         340,
@@ -1596,7 +1598,7 @@
       23,
       2,
       0,
-      30,
+      33,
       0,
       "MODEL"
     ],
@@ -1610,6 +1612,14 @@
     ],
     [
       25,
+      33,
+      0,
+      30,
+      0,
+      "MODEL"
+    ],
+    [
+      26,
       30,
       0,
       31,
@@ -1617,7 +1627,7 @@
       "MODEL"
     ],
     [
-      26,
+      27,
       31,
       0,
       32,
@@ -1625,16 +1635,8 @@
       "MODEL"
     ],
     [
-      27,
-      32,
-      0,
-      33,
-      0,
-      "MODEL"
-    ],
-    [
       28,
-      33,
+      32,
       0,
       34,
       0,

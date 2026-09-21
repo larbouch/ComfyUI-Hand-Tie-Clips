@@ -386,7 +386,17 @@ export function createPlanEditor(node, { onChange }) {
         const baseDur = durationWidget?.value;
         const ov = overs[overlapWidget?.value] ?? 0;
         const lengths = shots.map((s) => durs[s.duration || baseDur] ?? durs[baseDur] ?? 0);
-        const total = lengths.reduce((a, b) => a + b, 0) - ov * Math.max(0, shots.length - 1);
+        // A restart is a chain START: it relays nothing, so nothing is trimmed
+        // off it. Charging every hop after the first -- `(shots.length - 1)`,
+        // which is what stood here -- reads SHORT by `overlap` per restart, and
+        // short is the dangerous direction: `timing()` also draws the
+        // master-audio window via `chainSeconds`, so the window looked narrower
+        // than the audio the run would actually consume, and the room left for
+        // more shots looked bigger than it was. Same rule as
+        // `audio_lock.master_frame_count`, which is the one run() obeys.
+        const trims = shots.reduce(
+            (n, s, i) => n + (i > 0 && s.anchor !== "restart" ? 1 : 0), 0);
+        const total = lengths.reduce((a, b) => a + b, 0) - ov * trims;
         return { lengths, ov, fps, total: Math.max(0, total) };
     }
 
@@ -726,5 +736,8 @@ export function createPlanEditor(node, { onChange }) {
         renderCards();
     }
 
-    return { root, render: renderCards, reload, mode };
+    // `timing` is exported so the master-audio window can be drawn the width
+    // of the chain. It reads the LIVE card list, not the shot_plan widget, so
+    // the box resizes as shots are added rather than on the next accept.
+    return { root, render: renderCards, reload, mode, timing };
 }

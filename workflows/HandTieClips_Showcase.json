@@ -636,10 +636,12 @@
         "simple",
         "base",
         "freeze",
-        "0:0, 22:0, 44:1",
+        "auto",
         "linear",
         "refine",
-        "regular"
+        "regular",
+        0.0,
+        "denoise"
       ],
       "title": "H3 Ref2VA Chain - showcase 6x7s"
     },
@@ -896,7 +898,7 @@
       "type": "LTX_lora_loader",
       "pos": [
         520,
-        -40
+        312
       ],
       "size": [
         420,
@@ -909,7 +911,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 11
+          "link": 13
         },
         {
           "name": "clip",
@@ -922,7 +924,7 @@
           "name": "model",
           "type": "MODEL",
           "links": [
-            13
+            14
           ]
         },
         {
@@ -949,7 +951,7 @@
       "type": "H3AdaLNLoRAFix",
       "pos": [
         520,
-        240
+        582
       ],
       "size": [
         340,
@@ -962,7 +964,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 13
+          "link": 14
         }
       ],
       "outputs": [
@@ -970,7 +972,7 @@
           "name": "MODEL",
           "type": "MODEL",
           "links": [
-            14
+            15
           ]
         }
       ],
@@ -988,7 +990,7 @@
       "type": "MiniMaxLowVRAMAttention",
       "pos": [
         520,
-        430
+        762
       ],
       "size": [
         330,
@@ -1001,7 +1003,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 14
+          "link": 15
         }
       ],
       "outputs": [
@@ -1009,7 +1011,7 @@
           "name": "model",
           "type": "MODEL",
           "links": [
-            15
+            16
           ]
         }
       ],
@@ -1027,7 +1029,7 @@
       "type": "H3SLAAttention",
       "pos": [
         520,
-        530
+        -40
       ],
       "size": [
         340,
@@ -1040,7 +1042,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 15
+          "link": 11
         }
       ],
       "outputs": [
@@ -1048,7 +1050,7 @@
           "name": "MODEL",
           "type": "MODEL",
           "links": [
-            16
+            13
           ]
         }
       ],
@@ -1076,7 +1078,7 @@
       "type": "ModelPreviewOverrideKJ",
       "pos": [
         520,
-        900
+        850
       ],
       "size": [
         360,
@@ -1126,7 +1128,7 @@
       "type": "HTCH3Cache",
       "pos": [
         520,
-        1420
+        1360
       ],
       "size": [
         340,
@@ -1235,7 +1237,7 @@
       11,
       2,
       0,
-      30,
+      33,
       0,
       "MODEL"
     ],
@@ -1249,6 +1251,14 @@
     ],
     [
       13,
+      33,
+      0,
+      30,
+      0,
+      "MODEL"
+    ],
+    [
+      14,
       30,
       0,
       31,
@@ -1256,7 +1266,7 @@
       "MODEL"
     ],
     [
-      14,
+      15,
       31,
       0,
       32,
@@ -1264,16 +1274,8 @@
       "MODEL"
     ],
     [
-      15,
-      32,
-      0,
-      33,
-      0,
-      "MODEL"
-    ],
-    [
       16,
-      33,
+      32,
       0,
       34,
       0,

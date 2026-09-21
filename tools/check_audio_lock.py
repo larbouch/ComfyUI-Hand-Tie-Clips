@@ -234,14 +234,46 @@ def main():
     print(chr(10) + "take length is checked on the queue")
     with open(os.path.join(HERE, "h3_ref_chain.py"), encoding="utf-8") as _fh:
         src = _fh.read()
+    # Anchored on "gives", not on "is": the widget TOOLTIP also contains the
+    # words "master_audio_file is", so keying on that phrase made both this
+    # check and the raise-vs-warn one below pass against the docstring instead
+    # of the guard.
     ck("run() compares the take against the chain",
-       "master_audio_file is" in src and "is not used" in src,
+       "master_audio_file gives" in src and "is not used" in src,
        "both the refusal and the unused-tail note")
     ck("the refusal names both durations",
-       "but this chain" in src and "{total_frames}f" in src)
+       "but this chain is" in src and "{total_frames}f" in src)
+    ck("the refusal names the window slider",
+       "master_audio_start_s to" in src,
+       "a take long enough with the window too far in is fixed by moving "
+       "the window, not by padding the file")
     ck("it raises rather than warning",
-       "raise ValueError(" in src.split("master_audio_file is")[0][-400:],
+       "raise ValueError(" in src.split("master_audio_file gives")[0][-400:],
        "a mute final hop nobody asked for is not a warning")
+
+    # The window offset is applied ONCE, in the loader, so the chain's own
+    # clock stays 0-based and the three slice sites -- hop encode, the pin the
+    # next hop inherits, and the delivered passthrough -- keep reading exactly
+    # as they did. Three offsets applied at three call sites is the arithmetic
+    # that eventually disagrees with itself by one hop.
+    print(chr(10) + "the master-audio window is cut once, at load")
+    ldr = src.split("def _prepare_master_audio")[1].split(chr(10) + "def ")[0]
+    ck("the loader takes the start offset",
+       "def _prepare_master_audio(path, start_s=0.0)" in src)
+    ck("and cuts the waveform itself", "wav[..., cut:]" in ldr,
+       "not deferred to the slice sites")
+    ck("the digest is taken AFTER the cut",
+       ldr.index("wav[..., cut:]") < ldr.index("audio_digest"),
+       "otherwise sliding the window would reuse the cached hops")
+    ck("the offset is reported to the sample, not the widget",
+       "cut / float(sr)" in ldr,
+       "a 0.1-step slider on a 48 kHz file rounds")
+    ck("hop_audio_window_s is never handed the offset",
+       "hop_audio_window_s" in src
+       and "start_s" not in src.split("hop_audio_window_s")[1][:200],
+       "the chain clock stays 0-based")
+    ck("a start past the end of the take is refused",
+       "opens past the end of the take" in src)
 
     splice_checks(ck, sys.modules["htcpack.h3_ref_chain"], torch)
 

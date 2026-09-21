@@ -127,6 +127,30 @@ def main():
        "overlap_n if not hop_is_start" in src)
 
     print()
+    print("the editor's timing summary obeys the same rule")
+    js = open(os.path.join(HERE, "js", "editor", "plan_editor.js"),
+              encoding="utf-8").read()
+    t = js[js.index("function timing()"):]
+    t = t[:t.index("return { lengths")]
+    # Comments stripped: the paragraph explaining the old formula has to name
+    # it, and a check that fires on its own rationale is one people learn to
+    # edit around rather than obey.
+    t = "\n".join(ln for ln in t.splitlines()
+                  if not ln.strip().startswith("//"))
+    # The formula run() obeys is master_frame_count: one trim for every hop
+    # that CONTINUES the one before it. The old JS charged one to every hop
+    # after the first, restarts included, so the summary -- and the
+    # master-audio window drawn from it through chainSeconds -- read `overlap`
+    # short per restart. Short is the dangerous direction: it makes room look
+    # available that the queue-time guard will refuse. A 19-hop plan with 10
+    # restarts summarised as 1:50 for a chain that was really 1:59.
+    ck("timing() does not charge every hop after the first",
+       "shots.length - 1" not in t)
+    ck("timing() excuses a restart from the trim",
+       'anchor !== "restart"' in t)
+    ck("timing() still excuses hop 0", "i > 0" in t)
+
+    print()
     if FAIL:
         print("%d FAILURE(S): %s" % (len(FAIL), ", ".join(FAIL)))
         return 1

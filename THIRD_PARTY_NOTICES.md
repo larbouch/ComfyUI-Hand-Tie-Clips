@@ -32,6 +32,11 @@ three is decorative; do not remove any of them.
   `seg_t[kind]` raised `KeyError: 'cond_audio'` on any keyframe carrying an
   audio latent — every hop of an audio chain. Core ComfyUI and silveroxides'
   original both handle it, with the same values now used here.
+- Residual scratch buffer reuse and CPU feature signatures from PlagueKind
+  v1.5.2. The buffer is kept across reset()/finish() and overwritten in place
+  so cuMemFreeAsync is not called after Comfy tears down the block-stack
+  malloc scope; feature signatures are moved to CPU float.
+
 - A double-patch guard. Both upstreams write an owner key into `model_options`
   and replace the same `("dit", "block_loop", 0)` slot. Two caches on one wire
   corrupt each other without raising, so this copy reads all three owner keys

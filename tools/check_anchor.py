@@ -16,6 +16,7 @@ only a render exercises are guards nobody has run.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -119,6 +120,40 @@ def main():
     src = inspect.getsource(V)
     ck("no reference to the not-yet-loaded start_image",
        "start_image_file" in src and "start_image is None" not in src)
+
+    print("a restart is a chain START where the references are bound")
+    # The third way these guards shipped broken, and the only one a render
+    # could not show you: the line that FILLS `hop_subject_prose` asked
+    # `i == 0` while the line that USES it asked `hop_is_start`, so the
+    # subject_definitions block was dead on every restart. Those hops carried
+    # reference pictures nothing in the prose cited, and an uncited plate gets
+    # free-associated into the frame -- a cast member who is not in the beat
+    # walks into the shot. `@tag` did not rescue it, because `subject_names`
+    # flattened tags to bare prose on the same `i > 0` test.
+    #
+    # Read with comment lines stripped: the comments here have to be free to
+    # name `i == 0` while describing why it is wrong.
+    chain = os.path.join(HERE, "h3_ref_chain.py")
+    lines = [ln for ln in io.open(chain, encoding="utf-8").read().splitlines()
+             if not ln.strip().startswith("#")]
+
+    prod = [j for j, ln in enumerate(lines)
+            if "hop_subject_prose = _refs.subject_prose(" in ln]
+    ck("exactly one line fills hop_subject_prose", len(prod) == 1)
+    if len(prod) == 1:
+        before = [ln.strip() for ln in lines[:prod[0]] if ln.strip()][-1]
+        ck("it is guarded on hop_is_start, not i == 0  (%s)" % before,
+           before == "if hop_is_start:")
+
+    names = [j for j, ln in enumerate(lines) if "subject_names=(" in ln]
+    ck("exactly one subject_names= call site", len(names) == 1)
+    if len(names) == 1:
+        tail = " ".join(ln.strip() for ln in lines[names[0]:names[0] + 4])
+        ck("subject_names is withheld from chain starts",
+           "if not hop_is_start else None" in tail)
+
+    ck("the consumer still asks hop_is_start",
+       any("if hop_is_start and hop_subject_prose" in ln for ln in lines))
 
     print()
     if FAIL:

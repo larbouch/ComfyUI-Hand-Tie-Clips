@@ -21,6 +21,12 @@ import { createTrimBar, forgetPeaks } from "./trim_bar.js";
  * that cannot be trimmed. A still has no duration, so the first frame has none;
  * the other three each own a `<prefix>_start_s` / `<prefix>_end_s` pair.
  *
+ * A trim prefix ending in `*` is a FIXED-WIDTH window: it owns a
+ * `<prefix>_start_s` and no `_end_s`, because its width is not a choice the
+ * user gets to make. Master audio is the only one -- the window is the chain
+ * (duration x shots - overlap), so an OUT grip would be a control that does
+ * nothing. See `createTrimBar`'s `span`.
+ *
  * The sixth is a description widget, or null. Only the reference clip has one:
  * a picture in the rail carries its own `desc`, and the clip had nowhere to say
  * what it was for -- so it went to the encoder as <Video 1> with nothing naming
@@ -75,16 +81,30 @@ const SLOTS = [
      "music", null, null],
     ["master_audio_file", "audio", "master audio",
      "The spoken take for the whole chain. Every hop is given its own window of this file and generates the picture to match, so the voice is yours rather than the model's. Not a reference and not the SOUNDTRACK beside it: this one is delivered verbatim, no VAE round trip. Empty = the model generates a voice, as before.",
-     null, null, null],
+     "master_audio*", null, null],
 ];
 
 /** The widget names this strip owns, so the caller hides exactly those. */
-export const MEDIA_WIDGETS = SLOTS.flatMap(([name, , , , trim, desc, size]) => [
-    name,
-    ...(trim ? [`${trim}_start_s`, `${trim}_end_s`] : []),
-    ...(desc ? [desc] : []),
-    ...(size ? [size] : []),
-]);
+/** "voice_2" -> {prefix:"voice_2", fixed:false}; "master_audio*" -> fixed. */
+function trimSpec(trim) {
+    if (!trim) return null;
+    const fixed = trim.endsWith("*");
+    return { prefix: fixed ? trim.slice(0, -1) : trim, fixed };
+}
+
+export const MEDIA_WIDGETS = SLOTS.flatMap(([name, , , , trim, desc, size]) => {
+    const t = trimSpec(trim);
+    return [
+        name,
+        // A fixed-width window has no `_end_s` to own. Listing one anyway
+        // would put a name in `ownedNames` that the node never defines, and
+        // the caller hides widgets BY NAME.
+        ...(t ? [`${t.prefix}_start_s`,
+            ...(t.fixed ? [] : [`${t.prefix}_end_s`])] : []),
+        ...(desc ? [desc] : []),
+        ...(size ? [size] : []),
+    ];
+});
 
 function commit(node, w, value) {
     w.value = value;
@@ -98,7 +118,12 @@ function commit(node, w, value) {
     node.graph?.setDirtyCanvas?.(true, true);
 }
 
-export function createMediaStrip(node, { onChange } = {}) {
+/**
+ * @param chainSeconds () => seconds the chain will run, for the fixed-width
+ *   master-audio window. Absent or 0 falls back to an ordinary two-grip trim,
+ *   so an older caller still gets a working bar.
+ */
+export function createMediaStrip(node, { onChange, chainSeconds } = {}) {
     const root = el("div", "h3e-section h3e-media");
 
     const head = el("div", "h3e-head");
@@ -150,8 +175,10 @@ export function createMediaStrip(node, { onChange } = {}) {
         cell.appendChild(el("span", "h3e-media-label", label));
         // Looked up before the picker so a pick can zero the window. The bar
         // is built later; the widgets are the store either way.
-        const ws = trim && widgetByName(node, `${trim}_start_s`);
-        const we = trim && widgetByName(node, `${trim}_end_s`);
+        const tspec = trimSpec(trim);
+        const ws = tspec && widgetByName(node, `${tspec.prefix}_start_s`);
+        const we = tspec && !tspec.fixed
+            && widgetByName(node, `${tspec.prefix}_end_s`);
         const pick = createPicker({
             kind,
             get: () => String(w.value || ""),
@@ -173,7 +200,8 @@ export function createMediaStrip(node, { onChange } = {}) {
             set: (v) => {
                 commit(node, w, v);
                 if (v) forgetPeaks(v);
-                if (ws && we) { commit(node, ws, 0); commit(node, we, 0); }
+                if (ws) commit(node, ws, 0);
+                if (we) commit(node, we, 0);
                 afterPick();
             },
             onChange,
@@ -187,15 +215,25 @@ export function createMediaStrip(node, { onChange } = {}) {
         // The bar goes in its own full-width row under the grid, not inside a
         // media cell: a waveform squeezed to a thumbnail's width is a smear,
         // and the whole point is to see where the transients are.
-        if (ws && we) {
+        if (ws && (we || tspec.fixed)) {
             const row = el("div", "h3e-trimrow");
             row.appendChild(el("span", "h3e-media-label", label));
             const bar = createTrimBar({
                 kind,
                 name: () => String(w.value || ""),
-                get: () => ({ start: Number(ws.value) || 0, end: Number(we.value) || 0 }),
-                set: (s, e) => { commit(node, ws, s); commit(node, we, e); },
+                get: () => ({
+                    start: Number(ws.value) || 0,
+                    end: we ? Number(we.value) || 0 : 0,
+                }),
+                set: (s, e) => {
+                    commit(node, ws, s);
+                    if (we) commit(node, we, e);
+                },
                 onChange,
+                // Only the fixed slot asks for a width, and only when the
+                // caller knows one. Passing `undefined` keeps every other bar
+                // on exactly the code path it had.
+                span: tspec.fixed && chainSeconds ? chainSeconds : undefined,
             });
             row.appendChild(bar.root);
             trims.appendChild(row);

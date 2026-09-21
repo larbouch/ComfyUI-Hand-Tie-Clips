@@ -41,9 +41,17 @@ REFINE = {
     "refine_steps": (2, 3),
     "refine_sampler": ("same", "euler"),
     "refine_scheduler": ("simple", "beta"),
+    # denoise, NOT hop_tail: an undistilled trunk is accurate at every sigma,
+    # so the wider stride costs nothing there, and a graph saved before this
+    # widget existed must reload on the schedule it rendered under. hop_tail is
+    # reached through speed_mode=turbo, where the base makes it load-bearing.
+    "refine_align": ("denoise", "hop_tail"),
     "refine_cond": ("base", "hop"),
     "refine_audio": ("freeze", "refine"),
-    "refine_blend": ("0:0, 22:0, 44:1", "0:0, 22:0, 66:1"),
+    # 'auto', NOT the literal: the 22 in "0:0, 22:0, 44:1" is `overlap`, and
+    # the two only coincide at the default 0.9 s. auto resolves to a literal
+    # before the hop key, so it keys identically there and correctly elsewhere.
+    "refine_blend": ("auto", "0:0, 22:0, 66:1"),
     "refine_blend_interp": ("linear", "smooth"),
     "refine_head": ("refine", "freeze"),
 }
@@ -86,12 +94,17 @@ def refine_field(S, **over):
     """The `refine` key field exactly as run() builds it."""
     v = {k: d for k, (d, _) in REFINE.items()}
     v.update(over)
-    return [str(v["hop_refine"]), round(float(v["refine_denoise"]), 4),
+    field = [str(v["hop_refine"]), round(float(v["refine_denoise"]), 4),
             int(v["refine_steps"]), str(v["refine_sampler"]),
             str(v["refine_scheduler"]), str(v["refine_cond"]),
             str(v["refine_head"]), str(v["refine_audio"]),
             str(v["refine_blend"]).strip(), str(v["refine_blend_interp"]),
             over.get("refine_model_fp")]
+    # Mirrors run(): appended only for hop_tail, so pinning back to `denoise`
+    # reproduces a pre-refine_align key exactly.
+    if str(v["refine_align"]) != "denoise":
+        field.append(str(v["refine_align"]))
+    return field
 
 
 def main():
@@ -172,7 +185,11 @@ def main():
     # From AFTER the opening bracket: `hop_payload["refine"]` closes a bracket
     # of its own, so searching from `start` finds that one and reads an empty
     # block -- which passes every "is this name present" test by accident.
-    block = src[start:src.find("]", start + len(mark))] if start >= 0 else ""
+    # Runs to the hop_key() call, not to the list's closing bracket: a widget
+    # may be appended conditionally after the literal (refine_align is, so that
+    # `denoise` reproduces a pre-refine_align key), and that is still "in the
+    # key field".
+    block = src[start:src.find("hop_key = ", start)] if start >= 0 else ""
     missing = [n for n in REFINE if n not in block and n != "hop_refine"]
     ck("every refine widget is in the key field", not missing, str(missing))
     ck("...including the refine_model fingerprint", "refine_model_fp" in block)
@@ -216,9 +233,15 @@ def main():
            len(chain["widgets_values"]) == len(expect),
            f"{len(chain['widgets_values'])} vs {len(expect)}")
         ck(f"{fn} ships hop_refine=off", wv.get("hop_refine") == "off")
-        ck(f"{fn} carries the published ramp",
-           wv.get("refine_blend") == REFINE["refine_blend"][0],
-           repr(wv.get("refine_blend")))
+        # Not "is the published string" but "RESOLVES to it at the overlap
+        # this workflow ships", which is the property that actually matters:
+        # the delivered frames and the hop key both stay what 2.1 produced.
+        RB = sys.modules["htcpack.refine_blend"]
+        ov = H3.OVERLAP_FRAMES.get(str(wv.get("overlap")), 22)
+        ck(f"{fn} resolves to the published ramp at its own overlap",
+           RB.resolve(wv.get("refine_blend"), ov) == RB.DEFAULT_RAMP,
+           f"{wv.get('refine_blend')!r} @ overlap={wv.get('overlap')!r} "
+           f"({ov} f) -> {RB.resolve(wv.get('refine_blend'), ov)!r}")
 
     print()
     if FAIL:

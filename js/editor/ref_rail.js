@@ -389,7 +389,26 @@ export function createRefRail(node, { getPlan, setPlan, onChange, hopCount,
             const none = el("option", null, "setting/prop");
             none.value = "";
             subj.appendChild(none);
-            for (let i = 1; i <= 4; i += 1) {
+            // The ceiling is `MAX_REF_IMAGES`, served by routes.py: there
+            // cannot be more distinct subjects than there are pictures. It was
+            // hard-coded to 4 here, so a register with more than four people
+            // had no option to select for subjects 5+ -- and a <select> given a
+            // value with no matching <option> falls back to the FIRST one,
+            // which is "setting/prop". Those rows did not read as blank, they
+            // read as "this picture is scenery", the exact opposite of the
+            // JSON, and touching one wrote that back and demoted a character
+            // out of `_identity_lock`.
+            const maxSubj = Math.max(1, Number(V?.max_ref_images) || 9);
+            const nums = [];
+            for (let i = 1; i <= maxSubj; i += 1) nums.push(i);
+            // Belt and braces against this ever recurring: a subject number
+            // from outside the generated range still gets an option, so the
+            // value round-trips instead of silently becoming setting/prop.
+            if (r.subject != null && !nums.includes(Number(r.subject))) {
+                nums.push(Number(r.subject));
+                nums.sort((a, b) => a - b);
+            }
+            for (const i of nums) {
                 const o = el("option", null, `Subject ${i}`);
                 o.value = String(i);
                 subj.appendChild(o);

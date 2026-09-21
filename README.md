@@ -31,19 +31,6 @@ says which one each hop took.
 
 ---
 
-## What's new in 2.1.0 — 2026-09-16
-
-A second sampler pass per hop (`hop_refine`, ships **off**), an **H3 Cache**
-node that makes the non-turbo base fast enough to recommend, and a prompt-pack
-trust boundary so scene material cannot change hop count or rules. Shipped
-workflows now use **10 steps** (node default stays 14). Every new widget was
-appended — a 2.0 graph loads and renders identically.
-
-Full notes stay at the bottom under [Changelog](#changelog). Detail lives in
-[`CHANGELOG.md`](CHANGELOG.md).
-
----
-
 ## What it gives you
 
 | | |
@@ -56,6 +43,57 @@ Full notes stay at the bottom under [Changelog](#changelog). Detail lives in
 | **A lossless hop cache** | Re-roll shot 5 of 8 and only 5–8 re-render. Resume after a crash. Hold about one hop in RAM instead of the whole film. |
 | **A lip-sync lock** | `master_audio_file` — one continuous take every hop locks to, delivered as a passthrough. |
 | **Instruments** | Dry run, contact sheet, seam report and a live preview panel, so you can find the hop that broke without scrubbing the file. |
+
+---
+
+## Tested in public
+
+Before 2.0 shipped, a tester ran **ten controlled nine-hop chains** — 65 s each,
+one variable per run, same model, LoRA, references, locked audio and seed — and
+measured them end to end with her own instruments rather than by eye. The
+results below are hers, used with permission.
+
+![Scorecard across the ten runs](https://media.githubusercontent.com/media/dntpi/ComfyUI-Hand-Tie-Clips/main/docs/img/tester-scorecard.png)
+
+Her headline: **`anchor: "restart"` won.** It is the only run type whose last
+ten seconds is still on the reference still's side of its own hop 1 — colour,
+texture, background and framing all hold. The cost is that a restart is a hard
+cut. Second best was a small `pin_noise`, one run each way. **Nothing else moved
+the needle** — not `pin_renorm=band`, not reference protection, not a different
+DiT, not `ref_image_size=match`, not a fresh seed — and the plain control was
+the worst of the ten.
+
+![Background detail across hops](https://media.githubusercontent.com/media/dntpi/ComfyUI-Hand-Tie-Clips/main/docs/img/tester-background-drift.png)
+
+Her diagnosis is sharper than ours was: **relay convergence with no content
+anchor.** Each hop inherits its predecessor's end state and nothing pulls it
+back toward the reference. It also explains why the scale knobs did nothing —
+the pin's *statistics* never drifted (sigma stayed within ±6% across nine hops)
+while the picture lost a fifth of its chroma and doubled its background edges.
+The drift is in the latent's **content**, not its scale, and `pin_renorm` and
+`pin_noise` only rescale.
+
+Three things in 2.0 come straight from that study:
+
+- **Restart hops write their full length.** They used to drop 0.9 s of new
+  content as though they were continuations.
+- **`last_frame_guide=before_restart`**, so both sides of a restart cut meet on
+  the same photograph and it reads as a match cut rather than a jump.
+- **`tone_anchor_ref=still`.** The anchor used to hold hop 1, on the reasoning
+  that hop 1 is the one tone in the chain nothing has drifted into yet. Her
+  measurements say that is false — hop 1 is the *first casualty*, already short
+  of the still before any relay has happened:
+
+| | reference still | hop 1 |
+|---|---|---|
+| chroma | 33.6 | 30 |
+| b\* (warmth) | 26.6 | 22 |
+| fine detail | 1.00 | 0.72–0.99 |
+
+A chain anchored on hop 1 converges on a target that already fell short.
+
+**What her study could not fix, this release does not claim to fix.** Texture
+still ratchets on long chains, and 3–5 hops is still the honest limit.
 
 ---
 
@@ -90,7 +128,7 @@ common reason the node mounts with no UI on a fresh install.
 It is installed correctly when all three are true:
 
 - the startup log carries a line beginning `[HandTieClips]`
-- the browser console says `[HandTieClips] editor ui v2.1.0 loaded`
+- the browser console says `[HandTieClips] editor ui v2.2.0 loaded`
 - node search shows a **Hand Tie Clips** category with six nodes, each once
 
 Workflows saved before the 2026-08-29 rename keep loading — the old ids are
@@ -193,6 +231,35 @@ time, so no text box is ever quietly doing nothing.
 
 Keep later-hop beats on **what happens next**. Do not re-describe the face; the
 photos, the register and the pin already carry it.
+
+---
+
+## What's new in 2.2.0 — 2026-09-21
+
+Three corrections to the refine pass shipped in 2.1.0, plus the MEDIA audio
+window.
+
+**`refine_align`** picks the sigmas the refine pass re-runs. The default stays
+`denoise` — a 2.1 graph reloads on the schedule it rendered under — and
+`speed_mode=turbo` now sets `hop_tail`, which re-runs the hop's own last steps
+instead of inventing a schedule tuned for a 4-step base.
+
+**`refine_blend=auto`** derives the blend ramp from *this run's* `overlap`.
+The old literal `0:0, 22:0, 44:1` had the overlap width baked into it, so at a
+1.6 s overlap it refined frames inside the pin — exactly the seam cost the
+ramp exists to remove — and at 0.2 s it threw away refined frames you had
+paid for. `auto` at the shipped 0.9 s overlap resolves to the old string
+byte-for-byte, so cached hops still hit.
+
+**SLA moved to the front of the MODEL wire** in both shipped workflows, on
+PlagueKind's recommendation. That reorder changes `_model_fingerprint`, so
+**every hop re-renders once** on first run even with `cache_hops=on`.
+
+Also: **`master_audio_start_s`**, so the chain's audio window can start
+somewhere other than zero.
+
+Full notes stay at the bottom under [Changelog](#changelog). Detail lives in
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
@@ -304,57 +371,6 @@ on the body in frame and creasing where it bends, not pasted.
 - **Drop the clip to ~0.3 MP.** A reference clip's decode area is its token
   count, and its token count is its influence. A full-size plate out-argues a
   single photograph.
-
----
-
-## Tested in public
-
-Before 2.0 shipped, a tester ran **ten controlled nine-hop chains** — 65 s each,
-one variable per run, same model, LoRA, references, locked audio and seed — and
-measured them end to end with her own instruments rather than by eye. The
-results below are hers, used with permission.
-
-![Scorecard across the ten runs](https://media.githubusercontent.com/media/dntpi/ComfyUI-Hand-Tie-Clips/main/docs/img/tester-scorecard.png)
-
-Her headline: **`anchor: "restart"` won.** It is the only run type whose last
-ten seconds is still on the reference still's side of its own hop 1 — colour,
-texture, background and framing all hold. The cost is that a restart is a hard
-cut. Second best was a small `pin_noise`, one run each way. **Nothing else moved
-the needle** — not `pin_renorm=band`, not reference protection, not a different
-DiT, not `ref_image_size=match`, not a fresh seed — and the plain control was
-the worst of the ten.
-
-![Background detail across hops](https://media.githubusercontent.com/media/dntpi/ComfyUI-Hand-Tie-Clips/main/docs/img/tester-background-drift.png)
-
-Her diagnosis is sharper than ours was: **relay convergence with no content
-anchor.** Each hop inherits its predecessor's end state and nothing pulls it
-back toward the reference. It also explains why the scale knobs did nothing —
-the pin's *statistics* never drifted (sigma stayed within ±6% across nine hops)
-while the picture lost a fifth of its chroma and doubled its background edges.
-The drift is in the latent's **content**, not its scale, and `pin_renorm` and
-`pin_noise` only rescale.
-
-Three things in 2.0 come straight from that study:
-
-- **Restart hops write their full length.** They used to drop 0.9 s of new
-  content as though they were continuations.
-- **`last_frame_guide=before_restart`**, so both sides of a restart cut meet on
-  the same photograph and it reads as a match cut rather than a jump.
-- **`tone_anchor_ref=still`.** The anchor used to hold hop 1, on the reasoning
-  that hop 1 is the one tone in the chain nothing has drifted into yet. Her
-  measurements say that is false — hop 1 is the *first casualty*, already short
-  of the still before any relay has happened:
-
-| | reference still | hop 1 |
-|---|---|---|
-| chroma | 33.6 | 30 |
-| b\* (warmth) | 26.6 | 22 |
-| fine detail | 1.00 | 0.72–0.99 |
-
-A chain anchored on hop 1 converges on a target that already fell short.
-
-**What her study could not fix, this release does not claim to fix.** Texture
-still ratchets on long chains, and 3–5 hops is still the honest limit.
 
 ---
 
@@ -479,121 +495,9 @@ Safe when no shot authors a framing; visibly wrong when they do.
 
 ## Reference
 
-### Shot plan
-
-The cards write this; you rarely see it. It is under **JSON** on the node if you
-want to copy a plan between workflows.
-
-```json
-{
-  "shots": [
-    {
-      "beat": "The cook stands at the counter, looks up, and speaks one short line.",
-      "directives": {"camera": "hold", "framing": "medium", "pace": "steady", "tail": "ongoing"}
-    },
-    {
-      "beat": "The cook sets the knife down and turns toward the window, still talking.",
-      "directives": {"join": "continuous", "camera": "push_in", "framing": "close"}
-    }
-  ]
-}
-```
-
-Shot 1 is the whole opening. Every later shot is **only the new beat** — the
-node supplies the identity lock, the live-frame citation and the join itself.
-Fields, all optional except `beat`:
-
-| | |
-|---|---|
-| `beat` | What happens this hop. |
-| `directives` | The five axes below. |
-| `prose` | Free text appended verbatim, for anything the vocabulary lacks. |
-| `seed`, `steps`, `duration` | Per-shot overrides. `duration` takes the widget's labels (`"8 s"`). |
-| `refs` | Which register stills ride this hop, as tags. Omit for the register default; `[]` is none; a list is those tags only, in that order. Unknown tags fail on the queue. |
-| `anchor` | `"restart"` makes this hop a chain start. See above. |
-| `tone` | `"free"` skips the chain-wide tone pull once; `"rebase"` also moves the anchor. |
-| `locked` | Reuse this shot's cached render even when its inputs changed. Needs `cache_hops=on` and a stable `id`. Not to be confused with `subjects.N.locked`, which is identity text. |
-| `id` | Stable name, used as the cache pointer. Generated if absent. |
-
-**Hops can differ in length.** `duration` is per shot and everything downstream
-sizes itself around it. Labels are the widget's — `5 s`, `7 s`, `8 s`, `10 s`,
-`15 s` — and that set is fixed, not arbitrary: every value has to land on H3's
-frame grid (`n % 17 == 5` at 24 fps), so there is no `6.5 s`. Editing one shot's
-length invalidates that hop and the hops after it, and nothing before it.
-
-**Short hops cut, long hops flow.** Overlap is chain-wide — 0.9 s by default —
-so a 5 s hop asking for `join: continuous` spends a fifth of itself on the
-airlock, and the node prints a note saying so.
-
-### Directives
-
-| axis | options |
-|---|---|
-| `join` | `continuous`, `match_cut`, `hard_cut` — ignored on shot 1, which has nothing to join to |
-| `camera` | `hold`, `pan_follow`, `push_in`, `pull_back`, `orbit`, `handheld` |
-| `framing` | `keep`, `wide`, `medium`, `close` |
-| `pace` | `slow`, `steady`, `brisk` |
-| `tail` | `ongoing` (default), `settle`, `hold` |
-
-An unset axis emits nothing rather than asserting a default, so it costs no
-tokens. Everything is phrased affirmatively, for the reason in
-[The one law](#the-one-law).
-
-`join=continuous` with a framing change and a held camera warns: with the camera
-still, the only way to reach a new framing is a cut. Earn it on the move, or use
-`framing: keep`. A camera move pointing the opposite way from the framing
-(`push_in` with `wide`, `pull_back` with `close`) warns too. When `continuous`
-and the camera *is* moving, the framing sentence compiles as a **landing** —
-"The move settles into a close shot…" — so it does not fight the pin that still
-holds the previous framing.
-
-### Reference register
-
-```json
-{
-  "refs": [
-    {"tag": "hero_face",   "file": "cook_face.jpg",   "subject": 1, "retention": "fully_preserved"},
-    {"tag": "hero_outfit", "file": "cook_apron.jpg",  "subject": 1, "retention": "partially_copy"},
-    {"tag": "kitchen",     "file": "kitchen_wide.jpg", "retention": "reference", "mp": 0.3}
-  ],
-  "subjects": {
-    "1": {"name": "the cook", "locked": "the same face, the same short dark hair"}
-  }
-}
-```
-
-`file` is a picture in `ComfyUI/input/h3_refs`, set by the rail. `tag` is what
-you write in beats, and the node resolves it to the right `<Picture N>` **per
-hop**, so pulling a still out of the middle no longer breaks every later
-reference.
-
-`subject` groups pictures per person. **This matters:** declaring every picture
-as a photo of `<Subject 1>` makes the model render the *average* of two
-different people.
-
-`retention` says how much of a picture carries over — `fully_preserved` (face
-and bone structure exactly), `partially_copy` (the garment and its cut),
-`reference` (layout, surfaces and light, i.e. a place). Refs with a subject
-default to `fully_preserved`; everything else defaults to `reference`.
-
-`mp` caps one picture's pixel budget in megapixels. It is a **token dial, not a
-quality one**: H3 turns every reference into pixel area ÷ 256 entries and
-attends over all of them on every step of every hop, so a location plate costing
-what a face costs is waste. A 0.3 MP place plate is ~1,170 tokens; a 2 MP
-portrait is ~7,800.
-
-> **The dial is inert at the default.** On `ref_image_size=match` every
-> reference is first scaled down to the output's pixel area, and `mp` only ever
-> caps *further* — so at 768p (~1.03 MP) the 1.5 and 2.0 settings change
-> nothing. The real per-reference resolution control is `ref_image_size=max`
-> **plus** `mp`, never `mp` on its own.
-
-Add `"shots": [1, 2]` to a ref to keep it out of the hops it does not belong in.
-On a continuation chain, omitting `shots` means **hop 1 only** — right for a
-place plate, which beats the pin if it rides a hop set somewhere else. **Put
-face plates on every hop:** a hop with no face reference comes back a different
-person and no later hop recovers. A shot's own `refs` overrides all of this for
-that one hop.
+The shot fields, the directive vocabulary, the reference register and the
+dry-run flags are in [`PROMPTING.md`](PROMPTING.md), which ships with the
+pack. That file is how to write a plan; what follows is what the knobs do.
 
 ### Reference media: three clips, three voices
 
@@ -660,35 +564,6 @@ parameter count.
 
 Set `locked: true` on a shot to pin it to its last render regardless.
 
-### Reading a plan before you render it
-
-`dry_run=on` compiles every hop's prompt and stops. No model, no sampler,
-seconds instead of minutes. The compiled text comes out on `info`, and as a
-readable page on `contact_sheet`. This is the only way to see what the text
-encoder will actually receive — the directive layer, the continuation
-scaffolding, the identity lock and the `<Picture N>` citations are all assembled
-at render time.
-
-![`lock` and the range button on the shot cards](https://media.githubusercontent.com/media/dntpi/ComfyUI-Hand-Tie-Clips/main/docs/img/shot-lock-range.png)
-
-`render_through=N` stops after N hops; with `cache_hops=on`, 3 → 5 → 8 builds a
-chain up in stages and only ever renders the new hops. The plan is not
-truncated: shot 4 still knows it is shot 4 and keys the same way it will in the
-full run.
-
-`quality=draft` forces the 448p tier and 6 steps. Treat it as a **fidelity**
-lever rather than a speed one — measured at ~42 s/hop against ~45 s/hop at 7
-steps, so if you already render at 448p and 6–8 steps it saves almost nothing
-and `dry_run` is the fast button. Draft earns its place when your final is
-genuinely heavier, 768p at 14 steps.
-
-`contact_sheet=on` adds an image on the fourth output: one row per hop, that
-hop's first and last **delivered** frame side by side, its beat, its directives,
-and what actually happened to it. On a chain of any length this is the fastest
-way to find the hop that broke.
-
-![Contact sheet](https://media.githubusercontent.com/media/dntpi/ComfyUI-Hand-Tie-Clips/main/docs/img/contact-sheet-vlog.png)
-
 ### Defaults
 
 | | |
@@ -696,7 +571,7 @@ way to find the hop that broke.
 | resolution | 768p (1344×768 landscape) |
 | duration | 10 s (243 frames) |
 | overlap | 0.9 s (22 frames) |
-| steps | 8, with a 4-step turbo LoRA — the regime this node targets |
+| steps | **14.** With a 4-step turbo LoRA use **8** — the regime this node targets. The shipped workflows use 10 |
 | sampler / scheduler | `res_multistep` / `beta` |
 | seed per hop | on |
 | sigma shift | 12 / 3 |
@@ -810,7 +685,7 @@ The turbo stack in the shipped workflows is
 
 ## Docs
 
-[`CHANGELOG.md`](CHANGELOG.md) is what 2.1.0 contains, written for users.
+[`CHANGELOG.md`](CHANGELOG.md) is what 2.2.0 contains, written for users.
 [`PROMPTING.md`](PROMPTING.md) is the authoring guide. Both ship with the pack.
 
 The rest are in the repository only — the published package excludes them, so
@@ -825,6 +700,23 @@ this release.
 ## Changelog
 
 Full notes in [`CHANGELOG.md`](CHANGELOG.md).
+
+**2.2.0** — 2026-09-21. Three corrections to 2.1.0's refine pass, plus the
+MEDIA audio window. **`refine_align`** (`denoise` default, `hop_tail` under
+`speed_mode=turbo`) chooses whether the refine pass builds its own schedule or
+re-runs the hop's own last sigmas — the published `refine_denoise=0.50` +
+`refine_steps=2` pair was a schedule hard-coded to a 4-step base, whatever the
+hop actually sampled. **`refine_blend=auto`** derives the blend ramp from this
+run's `overlap` instead of hard-coding 22 frames; at 1.6 s the old literal
+refined frames *inside* the pin, and at 0.2 s it discarded refined frames.
+`auto` resolves to the old string exactly at the shipped 0.9 s overlap, so the
+hop cache still hits. `speed_mode=turbo` no longer moves `refine_head`, which
+is a measured drift lever and not a property of the checkpoint. **SLA moved to
+the front of the MODEL wire** in both shipped workflows on PlagueKind's
+recommendation, which changes `_model_fingerprint` and therefore re-renders
+every hop once. New: **`master_audio_start_s`**, where the chain's window opens
+inside `master_audio_file`; there is deliberately no matching end, because the
+width is the chain itself.
 
 **2.1.0** — 2026-09-16. A refine pass. `hop_refine` runs a second, short,
 deliberately under-converged sampler pass over each hop and blends it back into
@@ -843,38 +735,6 @@ second DiT on `refine_model`, which is why these values are frozen; the
 controlled `off`-vs-`full` pair has **not** been run, so attribution stays
 open and the CHANGELOG says so.
 
-**2.0.0** — 2026-09-06. Full release. `master_audio_file`, one continuous take
-every hop lip-syncs to. `last_frame_guide` (`before_restart` recommended).
-`anchor: "restart"` as a real chain start, now writing its full length. `refs`
-on a shot. The **SWAP** tab. Three reference-clip and three voice slots. A Lab
-tone anchor with `tone_anchor_ref=still`. `pin_mech`. A hop cache that no longer
-pickles, and an fp16 master buffer that halves the largest allocation in the
-pack. New widgets were appended, so saved 1.1 graphs keep their values — but a
-1.1 *hop cache* is fully invalidated on purpose, because the model fingerprint
-now identifies the base checkpoint.
+Earlier releases — 2.0.0 back to 0.4.x — are in
+[`CHANGELOG.md`](CHANGELOG.md).
 
-**1.1.x** — 2026-09-03/05. Tabbed editor with RUN pinned at the bottom.
-`render_from` / `render_through` as a range. `retention_analysis` on every hop a
-still rides, which fixes a reference pinned to any hop but the first being
-rendered *as* the shot. Computed canvas — eleven aspect ratios on H3's 32 px
-grid, so 16:9 at the top rung is 1344×768. Per-hop reference keys, so changing
-one picture re-renders only the hops it rides. 1.1.1 passes every Core argument
-by name, fixing `got multiple values for argument 'ref_image_size'` on builds
-that order MiniMax H3's parameters differently.
-
-**1.0.x** — 2026-09-02. First full release: the **WRITE** panel, the required
-two-document schema, the reference rail owning each picture's pixel budget, and
-the writer being told the hop length. Three plan lints were measured against
-real renders, found to be warning about correct work, and narrowed. Patch
-releases fixed the "no model is selected" bug on a fresh install and cleared
-registry-scanner findings.
-
-**0.4.x** — 2026-08-30. The five new dials reached the run panel; a dry run
-stopped returning a 1×1 placeholder that libx264 cannot encode. The prompt pack
-learned to show a place tag on both sides of its round trip. The hop cache
-stopped shelling out to `ffmpeg` and encodes FFV1 in process through PyAV —
-same format, bit-exact, and no external command for the registry scanner to flag.
-
-**Renamed 2026-08-29** from `ComfyUI-H3-Ref-Chain`. The old node ids are still
-registered as deprecated aliases, so every workflow saved before the rename
-keeps loading. Nothing needs migrating.

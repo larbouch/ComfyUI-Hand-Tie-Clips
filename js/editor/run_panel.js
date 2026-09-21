@@ -37,7 +37,12 @@ const OPEN_PROP = "h3_run_open";
  */
 const GROUPS = [
     ["output", ["resolution", "aspect", "duration", "overlap", "chains"]],
-    ["sampling", ["steps", "sampler_name", "scheduler", "seed",
+    // speed_mode leads the group because it DECLARES what is on the wire, and
+    // the dials under it are read in that light. It is not in the refine group
+    // even though the only thing it currently moves is refine_head: it
+    // describes the base, and the moment it also sets steps/sampler that is
+    // where a reader would look for it.
+    ["sampling", ["speed_mode", "steps", "sampler_name", "scheduler", "seed",
                   "control_after_generate", "seed_per_shot",
                   "shift_video", "shift_audio"]],
     ["join & pin", ["hop_script", "pin_to_qwen", "ref_image_size",
@@ -71,7 +76,11 @@ const GROUPS = [
                 // The blend and the head freeze are two answers to one
                 // question -- which frames keep the stock sample at the join --
                 // so they sit together and below the pass that produces them.
-                "refine_blend", "refine_blend_interp", "refine_head"]],
+                "refine_blend", "refine_blend_interp", "refine_head",
+                // Panel order is reading order, not declaration order; the
+                // widget itself is declared last so a saved workflow keeps its
+                // indices. It belongs beside the schedule it replaces.
+                "refine_align"]],
     ["cache", ["cache_hops", "cache_budget_gb"]],
     // Added 2026-08-30. 0.4.0 shipped these five on the Python side and never
     // touched js/, so all five fell through to native dials -- the documented
@@ -236,6 +245,36 @@ function fieldFor(node, w, onChange) {
     return null;
 }
 
+/* -- speed_mode -----------------------------------------------------------
+
+ * The preset WRITES the widgets instead of shadowing them.
+ *
+ * run()'s `_apply_speed_mode` overrides its values at render time and logs what
+ * moved, which is correct for the server but leaves the panel lying: it would
+ * read `refine_head: refine` while the render used `freeze`. That already cost
+ * this project a round of measurements where every turbo comparison was
+ * silently also a refine_head comparison. Stamping the values in means the
+ * dials say what will run, you can disagree with any of them afterwards, and
+ * the server-side override then finds nothing to move and stays quiet.
+ *
+ * The table comes from /vocab (`_speed_mode_table`), never from a copy here.
+ */
+function stampSpeedMode(node, table, mode, onChange) {
+    const row = table?.[mode];
+    if (!row) return null;
+    const moved = [];
+    for (const [name, value] of Object.entries(row)) {
+        const w = widgetByName(node, name);
+        if (!w) continue;                       // older Python side; say nothing
+        const was = w.value;
+        if (String(was) === String(value)) continue;
+        commitWidget(node, w, value, onChange);
+        moved.push(`${name}: ${was} → ${value}`);
+    }
+    return moved;
+}
+
+
 /* -- panel ---------------------------------------------------------------- */
 
 export function createRunPanel(node, { onChange, suppressed, hopCount } = {}) {
@@ -252,8 +291,13 @@ export function createRunPanel(node, { onChange, suppressed, hopCount } = {}) {
     // resolution label -> aspect label -> [w, h], from /vocab. Fetched once per
     // browser session and shared with every other consumer of the vocabulary.
     let CANVAS = null;
+    // mode -> widget -> value, from /vocab. Null until it arrives; the
+    // speed_mode dial then stamps nothing and behaves as a plain combo, which
+    // is the same thing that happens on an older Python side.
+    let SPEED = null;
     vocab().then((v) => {
         CANVAS = v?.canvas || null;
+        SPEED = v?.speed_modes || null;
         paintDigest();
     }).catch((err) => {
         // The digest falls back to the two labels; nothing else needs this.
@@ -273,6 +317,11 @@ export function createRunPanel(node, { onChange, suppressed, hopCount } = {}) {
             return new Set();
         }
     }
+
+    // What the last speed_mode pick changed. Lives outside build() only so the
+    // text survives the repaint that stamping triggers.
+    let speedNote = null;
+    let speedSaid = "";
 
     function build() {
         body.textContent = "";
@@ -313,6 +362,29 @@ export function createRunPanel(node, { onChange, suppressed, hopCount } = {}) {
                     l.title = tip;
                     f.input.title = tip;
                 }
+                if (name === "speed_mode") {
+                    // A second listener on the same select: comboField's own
+                    // fires first and commits the mode, so by the time this
+                    // runs the widget already holds the new value.
+                    f.input.addEventListener("change", () => {
+                        const moved = stampSpeedMode(node, SPEED, f.input.value,
+                                                     () => { paintDigest(); onChange?.(); });
+                        speedSaid = moved == null
+                            ? ""
+                            : (moved.length
+                                ? `speed_mode = ${f.input.value} set ${moved.join(", ")}.`
+                                : `speed_mode = ${f.input.value} — nothing to change.`);
+                        if (speedNote) {
+                            speedNote.textContent = speedSaid;
+                            speedNote.style.display = speedSaid ? "" : "none";
+                        }
+                        // Repaint every field, not just the ones it moved: the
+                        // stamp writes widgets this panel also draws, and a
+                        // dial showing a stale value is the exact failure the
+                        // write-don't-shadow rule exists to prevent.
+                        render();
+                    });
+                }
                 grid.appendChild(l);
                 owned.push(name);
                 readers.push(f.read);
@@ -324,6 +396,11 @@ export function createRunPanel(node, { onChange, suppressed, hopCount } = {}) {
             group.appendChild(grid);
             body.appendChild(group);
         }
+
+        speedNote = el("div", "h3e-note h3e-note-hint");
+        speedNote.style.display = speedSaid ? "" : "none";
+        speedNote.textContent = speedSaid;
+        body.appendChild(speedNote);
 
         const why = [...skip]
             .filter((name) => SUPPRESSED_WHY[name])

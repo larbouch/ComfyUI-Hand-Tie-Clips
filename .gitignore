@@ -25,3 +25,11 @@ docs/HANDOVER_*.md
 # Agent working files -- never ships
 CLAUDE.md
 .claude/
+
+# Bench graphs. `workflows/` is a shipped directory, so anything dropped in it
+# lands in a release -- and a bench graph wires nodes from packs a user has no
+# reason to have installed (HandTieClips_PDD_Acc_Test.json needs
+# `UC_MiniMaxH3PDDAcc`), so it loads broken for almost everyone.
+# `tools/check_workflows.py` validates the two shipped files by name and would
+# not catch it. Remove the line to ship one deliberately.
+workflows/*_Test.json

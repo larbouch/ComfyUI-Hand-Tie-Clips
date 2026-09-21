@@ -11,7 +11,7 @@ import { createWriterBar } from "./editor/writer_bar.js";
 import { createVideoSwap } from "./editor/video_swap.js";
 import { createMediaStrip, MEDIA_WIDGETS } from "./editor/media_strip.js";
 
-const VERSION = "v2.1.0";
+const VERSION = "v2.2.0";
 /* Both ids. The pack registers the pre-rename id as a deprecated subclass so
  * workflows saved before 2026-08-29 still load. If this check knew only the
  * new id those nodes would come up with NO editor at all, which looks exactly
@@ -153,11 +153,22 @@ function mountEditor(node) {
         rail.render();
     };
 
+    // Declared before the editor and assigned after it: the editor's
+    // onChange refreshes the media strip, and a `const` below this point
+    // would be in the temporal dead zone if the editor ever fired onChange
+    // while constructing.
+    let mediaStrip = null;
+
     const editor = createPlanEditor(node, {
         onChange: () => {
             applyVisibility();
             syncBadges();
             syncRailHops();
+            // Adding a shot, or changing `duration` / `overlap`, changes the
+            // chain length -- which IS the width of the master-audio window.
+            // Without this the box keeps the previous chain's width until
+            // something else happens to rebuild the strip.
+            mediaStrip?.render();
             node.graph?.setDirtyCanvas?.(true, true);
         },
     });
@@ -180,8 +191,23 @@ function mountEditor(node) {
         suppressed: () => (editor.mode() === "shots" ? ["chains", "hop_script"] : []),
     });
 
-    const mediaStrip = createMediaStrip(node, {
+    mediaStrip = createMediaStrip(node, {
         onChange: () => node.graph?.setDirtyCanvas?.(true, true),
+        // The master-audio window is drawn the width of the chain, so it has
+        // to ask the editor rather than the widgets: `duration` is only the
+        // default, a shot may override it, and the count comes from the cards.
+        // Returns 0 before the vocabulary arrives, which `createTrimBar` reads
+        // as "no span" and falls back to an ordinary trim -- a bar with the
+        // wrong width would be worse than one that waits.
+        chainSeconds: () => {
+            try {
+                const t = editor.timing?.();
+                const fps = t?.fps || 24;
+                return t && t.total > 0 ? t.total / fps : 0;
+            } catch {
+                return 0;
+            }
+        },
     });
 
     // Accept, not Write plan, lands the two strings in the widgets and then

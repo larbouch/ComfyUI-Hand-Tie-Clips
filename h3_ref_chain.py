@@ -1701,8 +1701,22 @@ def _resample_wav(wav, src_sr, dst_sr):
     return torchaudio.functional.resample(wav, src_sr, dst_sr)
 
 
-def _prepare_master_audio(path):
-    """Load the take once: stereo, native rate kept, plus a 32 kHz copy."""
+def _prepare_master_audio(path, start_s=0.0):
+    """Load the take once: stereo, native rate kept, plus a 32 kHz copy.
+
+    `start_s` drops the head of the file, and it is applied HERE rather than at
+    the three places the take is sliced -- the hop encode, the pin the next hop
+    inherits, and the delivered passthrough. Cutting once at load leaves the
+    chain's own clock 0-based, so `hop_audio_window_s`, the length guard and
+    the passthrough all keep reading exactly as they did; three offsets applied
+    at three call sites is the arithmetic that eventually disagrees with itself
+    by one hop. It also means the digest is taken AFTER the cut, so sliding the
+    window invalidates the hop cache without anything being added to the salt.
+
+    The window's WIDTH is not a parameter. It is `total_frames / FPS`, decided
+    by duration x shots - overlap, so there is nothing here to choose but where
+    it opens.
+    """
     got = _media.load_audio(path)
     if got is None:
         raise ValueError(
@@ -1710,12 +1724,28 @@ def _prepare_master_audio(path):
             "resolve under h3_refs the same way voice_file does.")
     wav = _alock.force_stereo(got["waveform"].contiguous().cpu())
     sr = int(got["sample_rate"])
+    full_s = float(wav.shape[-1]) / float(sr) if sr else 0.0
+    off = max(0.0, float(start_s or 0.0))
+    if off > 0.0:
+        cut = int(round(off * sr))
+        if cut >= int(wav.shape[-1]):
+            raise ValueError(
+                f"{TAG}: master_audio_start_s is {off:.2f}s but "
+                f"master_audio_file is {full_s:.2f}s long, so the window "
+                f"opens past the end of the take.")
+        wav = wav[..., cut:].contiguous()
+        # To the sample, not to the widget: a 0.1-step slider on a 48 kHz file
+        # rounds, and the printed number should be the cut that happened.
+        off = cut / float(sr)
     wav32 = _resample_wav(wav, sr, _alock.VAE_SR)
     digest = _store.audio_digest({"waveform": wav, "sample_rate": sr})
     print(f"[{TAG}] master_audio_file: loaded {path!r} "
-          f"({wav.shape[-1] / sr:.2f}s at {sr} Hz, stereo)", flush=True)
+          f"({full_s:.2f}s at {sr} Hz, stereo)"
+          + (f"; window opens at {off:.2f}s, "
+             f"{wav.shape[-1] / sr:.2f}s usable" if off > 0.0 else ""),
+          flush=True)
     return {"path": path, "wav": wav, "sr": sr, "wav32": wav32,
-            "digest": digest}
+            "digest": digest, "offset": off, "full_s": full_s}
 
 
 def _encode_locked_slice(audio_vae, wav32, t0, t1, audio_latent_len):
@@ -1821,13 +1851,37 @@ REFINE_HEAD_RAMP = 2
 # there is no corner of this loop where turbo is free. The preset does not claim
 # to fix that.
 #
-# The one row entry that IS evidence-backed is refine_head=freeze: turbo fails
-# at the seam first, and freeze is the only refine lever measured to move a seam
-# (1.9x/1.7x against 3.5x/7.3x), at a grain cost that is real and is invisible
-# on bokeh. Every field a row leaves out passes the widget straight through.
+# The row is ONE entry, refine_align=hop_tail: `denoise` builds an INDEPENDENT
+# grid --
+# int(steps/denoise) steps, keep the last steps+1 -- so the published 2/0.50 is
+# the tail of a 4-step grid whatever the hop sampled, and its closing stride
+# (0.8 -> 0) is wider in sigma than any step an 8-step hop takes. A distilled
+# trunk is only accurate at the sigmas it was distilled for, so that stride is
+# off-manifold by construction on exactly the bases this row is for; hop_tail
+# re-runs the hop's own last sigmas instead, at identical cost.
+#
+# It belongs in the row and not in the default because the failure it fixes is
+# a property of the BASE, not of the era's sampler fashion: an undistilled trunk
+# is accurate everywhere, so `denoise` is fine there and stays the default --
+# which also means a 2.1 graph reloads on the schedule it rendered under. That
+# base-vs-fashion line is the whole admission test for this table: sampler,
+# scheduler and step count are turbo-community fashion, they turn over every
+# release, and a stamping preset that moved them would overwrite a choice the
+# user made. They are deliberately absent and are not coming back.
+#
+# **refine_head=freeze was in this row and was REMOVED 2026-09-20.** Its
+# evidence was a seam reading (1.9x/1.7x against 3.5x/7.3x), and CLAUDE.md is
+# explicit that a seam measurement is corroboration, never the decision. The
+# better reading is that freeze was compensating for the bug above: with
+# `denoise` the refine entered hops 2+ at an off-grid sigma, so not refining the
+# head was the lesser harm. hop_tail removes the cause, and the only end-to-end
+# turbo evidence in this project -- a 7-hop chain on a turbo merge, hop_tail
+# with refine_head=refine -- came out clean where the unrefined arm was crunchy.
+# Freezing the head there would have cost grain for a seam fix already made.
+# Every field a row leaves out passes the widget straight through.
 SPEED_MODES = {
     "regular": {},
-    "turbo": {"refine_head": "freeze"},
+    "turbo": {"refine_align": "hop_tail"},
 }
 
 # Stated with the mode, once per run, so the console carries the cost of the
@@ -1974,7 +2028,8 @@ def _refine_head_freeze(latent, overlap_n, freeze_head=True, freeze_audio=True):
 def _refine_sampled(sampled, *, model, guider, sampler, scheduler,
                     steps, denoise, seed, sigma_cache, hop_no,
                     sampler_label="same", cond_label="base",
-                    own_model=False):
+                    own_model=False, align="hop_tail",
+                    hop_sigmas=None, hop_steps=0):
     """Second low-denoise sample of a FINISHED hop latent.
 
     Every ratchet lever before this one acts at the join and acts by arithmetic:
@@ -1984,21 +2039,71 @@ def _refine_sampled(sampled, *, model, guider, sampler, scheduler,
     Re-sampling can, because it runs the model. That is the whole reason this
     exists and the reason it sits here rather than at the join.
 
+    `align` picks WHERE on the noise curve those model evals land, and it is the
+    whole of the turbo story.
+
+    `denoise` is the original path and builds an INDEPENDENT schedule:
+    `BasicScheduler(steps, denoise)` asks for `int(steps/denoise)` steps and
+    keeps the last `steps+1`. At the published 2 / 0.50 / shift 12 that is the
+    tail of a FOUR-step grid, `[0.9231, 0.8000, 0]`. But the hop was sampled on
+    an EIGHT-step grid, `[1.0, .9882, .9730, .9524, .9231, .8780, .8, .6316,
+    0]`. The two grids share only their endpoints. The refine re-enters at the
+    hop's step-4 sigma and then takes two strides where the hop took four --
+    and its closing stride is `0.8 -> 0`, a jump 27% larger in sigma than any
+    step the hop itself ever took. On a plain base that reads as the documented
+    "deliberately under-converged" texture pass. On a turbo LoRA or merge it is
+    a different thing entirely: a few-step distillation is only accurate AT the
+    sigmas it was distilled for, so an off-grid stride of that size is taken by
+    a model that was never trained to take it, from a state it was never shown.
+    That is the misalignment -- not the number of evals, and not `s0`, which a
+    LoRA does not move at all (the sigma transform comes from `shift_video`,
+    and a LoRA does not touch `model_sampling`).
+
+    `hop_tail` -- the default -- fixes it by construction rather than by
+    tuning: the refine simply RE-RUNS THE HOP'S OWN LAST `steps` SIGMAS.
+    `refine_steps=2` against that 8-step hop gives `[0.8, 0.6316, 0]` -- same
+    two evals, same cost, every one of them on the grid the trunk was distilled
+    for, and the closing stride is exactly the hop's own closing stride. It
+    needs no re-tuning when the base changes, because it is DERIVED from
+    whatever schedule the base is running; swap turbo for plain, or 8 steps for
+    4, and the refine follows. `refine_denoise` is unused here and the log says
+    so.
+
+    `denoise` is kept so an archived run reproduces bit-for-bit.
+
     The schedule is cached under a ("refine", steps, denoise, scheduler) tuple.
     The hop schedules are cached under a bare int, so the two can never collide
     -- which matters more than it looks: a collision would hand the refine pass
     the hop's full-denoise schedule and quietly re-render the hop from noise.
     `scheduler` is in the key because refine_scheduler can differ from the hop's:
     without it, flipping simple/sgm_uniform mid-chain would be served the first
-    one's sigmas and the widget would do nothing.
+    one's sigmas and the widget would do nothing. `hop_tail` needs none of that
+    -- it slices a schedule that already exists.
     """
-    key = ("refine", int(steps), round(float(denoise), 4), str(scheduler))
-    if key not in sigma_cache:
-        sigma_cache[key] = _result(_core_call(
-            BasicScheduler, "the refine sigma schedule",
-            model=model, scheduler=str(scheduler), steps=int(steps),
-            denoise=float(denoise)))[0]
-    r_sigmas = sigma_cache[key]
+    sched_label = str(scheduler)
+    denoise_label = f"denoise={float(denoise):.2f} "
+    if str(align) == "hop_tail" and hop_sigmas is not None:
+        n_hop = int(hop_sigmas.shape[-1]) - 1
+        # At least one of the hop's own steps always stays untouched. Without
+        # the clamp `refine_steps >= hop_steps` would slice from sigma 1.0 and
+        # the "refine" would silently become a full re-render -- the exact trap
+        # the sigma-cache keys above were built to avoid.
+        k = max(1, min(int(steps), n_hop - 1))
+        if k != int(steps):
+            print(f"[{TAG}] hop {hop_no}: refine steps {int(steps)} -> {k} "
+                  f"(hop_tail holds one of the hop's {n_hop} steps back; "
+                  f"a refine entering at sigma 1.0 is a re-render)", flush=True)
+        r_sigmas = hop_sigmas[n_hop - k:]
+        sched_label = f"hop_tail[-{k}] of {n_hop}"
+        denoise_label = ""
+    else:
+        key = ("refine", int(steps), round(float(denoise), 4), str(scheduler))
+        if key not in sigma_cache:
+            sigma_cache[key] = _result(_core_call(
+                BasicScheduler, "the refine sigma schedule",
+                model=model, scheduler=str(scheduler), steps=int(steps),
+                denoise=float(denoise)))[0]
+        r_sigmas = sigma_cache[key]
     # An independent seed. Re-noising on the hop's own seed would push along the
     # direction the hop already travelled, which is a weaker perturbation than a
     # fresh draw -- it would read as "refine barely did anything" and be
@@ -2007,9 +2112,9 @@ def _refine_sampled(sampled, *, model, guider, sampler, scheduler,
         RandomNoise, "the refine noise source",
         noise_seed=(int(seed) ^ 0x5EF1) & 0x7FFFFFFF))[0]
     print(f"[{TAG}] hop {hop_no}: refine {int(r_sigmas.shape[-1]) - 1} steps "
-          f"denoise={float(denoise):.2f} "
+          f"{denoise_label}"
           f"sigma={float(r_sigmas[0]):.4f}->0 "
-          f"[{sampler_label}/{scheduler}, cond={cond_label}"
+          f"[{sampler_label}/{sched_label}, cond={cond_label}"
           + (", refine_model" if own_model else "") + "]", flush=True)
     return _result(_core_call(
         SamplerCustomAdvanced, "the refine sampler",
@@ -2855,15 +2960,19 @@ class HandTieClips:
                     ),
                 }),
                 "refine_blend": ("STRING", {
-                    "default": _rblend.DEFAULT_RAMP, "multiline": False,
+                    "default": _rblend.AUTO, "multiline": False,
                     "tooltip": (
                         "frame:weight keyframes deciding which frames ship the "
                         "raw sample (0) and which ship the refined one (1). "
-                        "The default '0:0, 22:0, 44:1' keeps the pinned "
-                        "overlap stock and crosses to fully refined over the "
-                        "22 frames after it -- so the join continues a hop "
+                        "'auto' derives them from THIS run's overlap -- raw "
+                        "across the pin, then crossing to fully refined over "
+                        "the 22 frames after it -- so the join continues a hop "
                         "that was sampled the same way it was, which is the "
-                        "measured seam cost of refining. Frames are mapped "
+                        "measured seam cost of refining. At the default 0.9 s "
+                        "overlap that is exactly '0:0, 22:0, 44:1', the "
+                        "published ramp; at 0.2 s or 1.6 s the literal string "
+                        "would hold the wrong frames, which is why auto exists. "
+                        "Type your own pairs to override. Frames are mapped "
                         "onto the latent grid through H3's real (1,4,4,4,4) "
                         "token cycle and read off this render's own length, "
                         "not off a duration widget. Empty = no blend, the "
@@ -2914,6 +3023,61 @@ class HandTieClips:
                         "that rather than undoing it. It reaches the hop key "
                         "only through the refine fields it moves, so with "
                         "hop_refine=off it is inert."
+                    ),
+                }),
+                # APPENDED 2026-09-19, LAST for the same reason as everything
+                # else down here: widgets_values is positional and a saved
+                # workflow reads it by index.
+                "master_audio_start_s": ("FLOAT", {
+                    # 0.01, not the 0.1 the other trim widgets declare. The
+                    # frontend derives its rounding from the step, so a 0.1 step
+                    # quantises a stored 4.03 to 4.00 -- 1440 samples at 48 kHz,
+                    # 30 ms, measured against a real render. On a two-grip trim
+                    # that error lands on a reference clip's in-point and is
+                    # inaudible; here it moves a locked take under a frozen
+                    # mouth, which is the one place in this node where 30 ms of
+                    # audio placement is a visible result. `round` is set
+                    # explicitly rather than left to be derived, because that
+                    # derivation is frontend behaviour and not a contract.
+                    "default": 0.0, "min": 0.0, "max": 3600.0,
+                    "step": 0.01, "round": 0.01,
+                    "tooltip": (
+                        "Where the chain's window opens inside "
+                        "master_audio_file, in seconds. There is no matching "
+                        "end: the window's WIDTH is the chain itself "
+                        "(duration x shots - overlap), so the only choice is "
+                        "where it starts. The MEDIA strip draws it as a "
+                        "fixed-width box you slide along the waveform. "
+                        "Worth setting: hop lengths are quantised, so a chain "
+                        "length is almost never a track length -- 6 x 10 s is "
+                        "56.17 s, not 60 -- and at 0.00 a mastered track "
+                        "gives you its intro. Moving this changes the hop "
+                        "cache key."
+                    ),
+                }),
+                # APPENDED 2026-09-20, LAST, for the reason stated above:
+                # inserting it beside the other refine_* widgets would have
+                # renumbered refine_cond onward in every saved workflow.
+                "refine_align": (["hop_tail", "denoise"], {
+                    "default": "denoise",
+                    "tooltip": (
+                        "Where on the noise curve the second pass lands. "
+                        "hop_tail re-runs the hop's OWN last refine_steps "
+                        "sigmas, so every eval sits on the grid the trunk was "
+                        "distilled for -- this is the setting to use with a "
+                        "turbo LoRA or merge, and it costs exactly the same "
+                        "time. denoise is the original path: an independent "
+                        "int(steps/denoise)-step schedule, which at 2/0.50 is "
+                        "the tail of a 4-step grid even when the hop ran 8. "
+                        "Its closing stride (0.8 -> 0) is larger than any step "
+                        "the hop took, which a few-step distill was never "
+                        "trained for. denoise stays the DEFAULT because an "
+                        "undistilled trunk is accurate at every sigma, so the "
+                        "wider stride costs nothing there -- and a graph "
+                        "saved before this widget existed reloads on the "
+                        "schedule it actually rendered under. speed_mode="
+                        "turbo sets hop_tail for you. refine_denoise is "
+                        "ignored under hop_tail."
                     ),
                 }),
             },
@@ -2995,13 +3159,14 @@ class HandTieClips:
             reference_video_3_end_s=0.0,
             voice_2_file="", voice_2_start_s=0.0, voice_2_end_s=0.0,
             voice_3_file="", voice_3_start_s=0.0, voice_3_end_s=0.0,
-            master_audio_file="",
+            master_audio_file="", master_audio_start_s=0.0,
             last_frame_guide="off",
             voice_every_hop="off",
             hop_refine="off", refine_denoise=0.50, refine_steps=2,
             refine_sampler="same", refine_scheduler="simple",
+            refine_align="denoise",
             refine_cond="base", refine_model=None, refine_audio="freeze",
-            refine_blend=_rblend.DEFAULT_RAMP, refine_blend_interp="linear",
+            refine_blend=_rblend.AUTO, refine_blend_interp="linear",
             refine_head="refine", speed_mode="regular",
             unique_id=None):
         # First thing, before a single model is touched: hand the writer's VRAM
@@ -3231,7 +3396,8 @@ class HandTieClips:
         # Empty string is off. The lock is not entered, the cache key does
         # not grow a new field, delivered audio stays generated. That is
         # the byte-identical claim.
-        locked = (_prepare_master_audio(master_audio_file)
+        locked = (_prepare_master_audio(master_audio_file,
+                                        master_audio_start_s)
                   if str(master_audio_file or "").strip() else None)
 
         # Slots 2 and 3. All three decode at the same reference_video_size --
@@ -3406,6 +3572,7 @@ class HandTieClips:
                     "refine_blend": str(refine_blend),
                     "refine_blend_interp": str(refine_blend_interp),
                     "refine_head": str(refine_head),
+                    "refine_align": str(refine_align),
                 })
                 refine_denoise = _sv["refine_denoise"]
                 refine_steps = _sv["refine_steps"]
@@ -3416,6 +3583,7 @@ class HandTieClips:
                 refine_blend = _sv["refine_blend"]
                 refine_blend_interp = _sv["refine_blend_interp"]
                 refine_head = _sv["refine_head"]
+                refine_align = _sv["refine_align"]
                 for _f, _was, _now in _smoved:
                     print(f"[{TAG}]   {_speed} sets {_f}={_now} "
                           f"(widget read {_was})", flush=True)
@@ -3423,6 +3591,15 @@ class HandTieClips:
                     print(f"[{TAG}]   the widgets already match the {_speed} "
                           f"row", flush=True)
 
+        # `auto` becomes a literal here -- before parse and before the hop key,
+        # so the key stores the ramp that ran and `auto` at a 22 f overlap keys
+        # exactly as the published string does.
+        _blend_was = str(refine_blend)
+        refine_blend = _rblend.resolve(refine_blend, overlap_n)
+        if str(refine_blend) != _blend_was and str(hop_refine) != "off":
+            print(f"[{TAG}] refine_blend=auto -> {refine_blend!r} "
+                  f"(raw across the {overlap_n} f pin, crossing over the "
+                  f"{_rblend.CROSS_FRAMES} f after it)", flush=True)
         # Parsed up front so a malformed ramp fails on the queue rather than
         # two minutes into hop 1, and so a dry run catches it too.
         try:
@@ -3509,17 +3686,29 @@ class HandTieClips:
         if locked is not None:
             take_s = float(locked["wav"].shape[-1]) / float(locked["sr"])
             need_s = float(total_frames) / FPS
+            off = float(locked.get("offset") or 0.0)
+            full_s = float(locked.get("full_s") or take_s)
+            _from = f" from {off:.2f}s" if off > 0.0 else ""
             if take_s + 1.0 / FPS < need_s:
+                # Name the latest start that WOULD fit. "Pad the recording" is
+                # the only advice this could give before the window existed,
+                # and it is the wrong one when the file is long enough and the
+                # window is simply too far in.
+                latest = full_s - need_s
+                fix = (f"Move master_audio_start_s to {latest:.2f}s or "
+                       f"earlier, shorten the chain, or pad the recording."
+                       if latest >= 0.0 else
+                       f"Shorten the chain, or pad the recording to at least "
+                       f"{need_s:.2f}s.")
                 raise ValueError(
-                    f"{TAG}: master_audio_file is {take_s:.2f}s but this chain "
-                    f"is {need_s:.2f}s ({total_frames}f at {FPS:g} fps). The "
-                    f"last {need_s - take_s:.2f}s would be locked to silence "
-                    f"the take does not contain. Shorten the chain, or pad the "
-                    f"recording to at least {need_s:.2f}s.")
+                    f"{TAG}: master_audio_file gives {take_s:.2f}s{_from} "
+                    f"but this chain is {need_s:.2f}s ({total_frames}f at "
+                    f"{FPS:g} fps). The last {need_s - take_s:.2f}s would be "
+                    f"locked to silence the take does not contain. {fix}")
             if take_s > need_s + 1.0:
-                print(f"[{TAG}] master_audio_file is {take_s:.2f}s for a "
-                      f"{need_s:.2f}s chain; the last {take_s - need_s:.2f}s "
-                      f"is not used", flush=True)
+                print(f"[{TAG}] master_audio_file leaves {take_s:.2f}s{_from} "
+                      f"for a {need_s:.2f}s chain; the last "
+                      f"{take_s - need_s:.2f}s is not used", flush=True)
 
         # A dry run must not allocate the master. At 8 x 15 s and 1280x736 that
         # is 2742 full float frames -- ~31 GB -- for a feature whose entire
@@ -3540,6 +3729,9 @@ class HandTieClips:
         prev_imgs = None
         prev_audio = None
         prev_sampled = None
+        # Which subjects the relay is actually carrying. Not the register:
+        # see the continuity_line call site.
+        prev_subjects = set()
         pbar = comfy.utils.ProgressBar(n)
 
         hop_store = None
@@ -3754,6 +3946,17 @@ class HandTieClips:
                 if not hop_videos:
                     hop_videos = None
 
+            # Who this hop is holding: its own subjects, plus whoever the pin
+            # hands it. A chain start is handed nobody, so it holds only its
+            # own -- and because this is what seeds `prev_subjects`, a person
+            # carried through a still-less hop stays carried, which is the
+            # case `continuity_line` exists for.
+            hop_subjects = {r["subject"] for r in hop_active
+                            if r["subject"] is not None}
+            carried_subjects = (hop_subjects if hop_is_start
+                                else hop_subjects | prev_subjects)
+            prev_subjects = carried_subjects
+
             # One ordinal map for this hop. The prompt's <Picture N> citations
             # and the identity lock's ordinals have to agree, and computing the
             # same shift twice is exactly how they drift apart. `p`, not `n` --
@@ -3764,24 +3967,37 @@ class HandTieClips:
             if ref_plan_refs:
                 # Plan-wide subjects so @hero_face still resolves when that
                 # photograph is off this hop.
-                # Names, not ordinals, from hop 2 on. `subject_definitions:`
-                # is hop-1 material, so a `<Subject N>` reaching hop 4 has no
-                # antecedent in its own encode -- the dangling-token defect
-                # that turned an undescribed "the bowl" into a steel one.
-                # `continuity_line` rides every continuation hop and is what
-                # the name binds to.
+                # Names, not ordinals, on a CONTINUATION. `subject_definitions:`
+                # rides every chain START, so a `<Subject N>` on one has its
+                # antecedent in its own encode; on a continuation it does not --
+                # the dangling-token defect that turned an undescribed "the
+                # bowl" into a steel one. `continuity_line` rides every
+                # continuation hop and is what the name binds to.
                 block = _refs.resolve_tags(
                     block, hop_ords, _refs.subjects(ref_plan_refs),
                     where=f"shot {i + 1}",
                     declared={r["tag"] for r in ref_plan_refs},
                     subject_names=({k: (v or {}).get("name")
                                     for k, v in (ref_subjects or {}).items()}
-                                   if i > 0 else None))
-                if i == 0:
-                    # Hop 1 only: subject_prose derives its own ordinals with no
-                    # still_shift, correct only because hop 1 has no pin.
-                    # Computing it on hop 2+ invites an off-by-one against the
-                    # live frame.
+                                   if not hop_is_start else None))
+                if hop_is_start:
+                    # Every chain start, not just hop 1. subject_prose derives
+                    # its own ordinals with no still_shift, which is correct
+                    # exactly when the hop has no pin -- and a restart has
+                    # none: `still_shift` is 0 and `live_p` is None twenty
+                    # lines up, because the pin branch is gated on
+                    # `not hop_is_start`.
+                    #
+                    # Reading `i == 0` here left the consumer below -- which
+                    # already asks `hop_is_start` -- dead for every restart.
+                    # Those hops were handed their reference pictures in the
+                    # DiT and as `<Picture N>` in the tokenizer with NOTHING
+                    # in the prose citing them, and an uncited plate is the
+                    # one thing this pack knows the model free-associates
+                    # into the frame: a cast member who is not in the beat
+                    # walks into the shot. `@tag` did not save it either,
+                    # because `subject_names` was flattening those to bare
+                    # prose on the same off-by-one test.
                     hop_subject_prose = _refs.subject_prose(hop_active, ref_subjects)
             if hop_is_start and hop_subject_prose and not _d.is_full_h3_prompt(block):
                 block = hop_subject_prose + "\n\n" + block
@@ -3826,10 +4042,22 @@ class HandTieClips:
                 # the chain whether or not their photograph rides this hop.
                 # This is the text that has to survive hop 5 of the showcase,
                 # which schedules no references at all.
+                # `carried_subjects`, NOT every subject in the register.
+                # This line says "X continues, <wardrobe>" about each person
+                # it is given, and at cfg 1.0 there is no negative branch, so
+                # every name in it is additive -- naming someone puts them in
+                # the frame. Built plan-wide it was correct for a one- or
+                # two-hander and catastrophic past that: an eight-character
+                # register told hop 2 that all eight continue, with wardrobe,
+                # and the model duly rendered the whole cast standing in a
+                # row. Seed-independent, because the register is not the seed.
+                #
+                # The rationale for reaching beyond `hop_active` still holds
+                # -- a person the pin carries with no still riding must be
+                # named -- and `carried_subjects` keeps exactly that and
+                # nothing more.
                 hop_continuity = _refs.continuity_line(
-                    ref_subjects,
-                    {r["subject"] for r in ref_plan_refs
-                     if r["subject"] is not None}) if ref_plan_refs else ""
+                    ref_subjects, carried_subjects) if ref_plan_refs else ""
                 # What each still riding THIS hop is for. Hop 1 gets this from
                 # subject_prose; without it here a scheduled still reaches the
                 # encoder as an uncited photograph with no stated role, and a
@@ -4046,6 +4274,13 @@ class HandTieClips:
                         str(refine_head), str(refine_audio),
                         str(refine_blend).strip(), str(refine_blend_interp),
                         refine_model_fp]
+                    # Appended only for hop_tail, so a run pinned back to
+                    # `denoise` keys exactly as it did before this mode
+                    # existed -- same key, same frames, and an archived
+                    # entry still hits. hop_tail gets its own key space
+                    # because it really does sample different sigmas.
+                    if str(refine_align) != "denoise":
+                        hop_payload["refine"].append(str(refine_align))
                 hop_key = _store.hop_key(
                     None if hop_restart else prev_key, hop_payload)
                 # A locked shot reuses its last render even though its inputs
@@ -4287,6 +4522,8 @@ class HandTieClips:
                             scheduler=refine_sched,
                             steps=(int(refine_steps) or int(hop_steps)),
                             denoise=float(refine_denoise), seed=shot_seed,
+                            align=str(refine_align),
+                            hop_sigmas=hop_sigmas, hop_steps=int(hop_steps),
                             sigma_cache=sigma_cache, hop_no=i + 1,
                             sampler_label=(sampler_name
                                            if str(refine_sampler) == "same"

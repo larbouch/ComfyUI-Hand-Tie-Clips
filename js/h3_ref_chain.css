@@ -864,6 +864,20 @@
                 var(--h3-accent) 3px, var(--h3-accent) 6px, transparent 6px);
 }
 .h3e-trim-grip:hover { background: var(--h3-accent-soft); }
+/* The fixed-width master-audio window. Dragged bodily rather than by a grip,
+ * because its width is the chain and there is no edge to pull -- so the whole
+ * box is the handle and it needs its own hit area above the canvas.
+ * `touch-action: none` for the same reason the grips have it: without it a
+ * touch drag scrolls the panel and setPointerCapture never sees the move. */
+.h3e-trim-win {
+    position: absolute; top: 0; bottom: 0;
+    cursor: grab;
+    touch-action: none;
+    border-left: 2px solid var(--h3-accent);
+    border-right: 2px solid var(--h3-accent);
+    background: color-mix(in srgb, var(--h3-accent) 10%, transparent);
+}
+.h3e-trim-win:active { cursor: grabbing; }
 .h3e-trim-head {
     position: absolute; top: 0; bottom: 0; left: 0;
     width: 1px; background: var(--h3-fg, #fff); opacity: 0.55;
@@ -877,6 +891,9 @@ video.h3e-trim-media { height: auto; max-height: 110px; }
     font-variant-numeric: tabular-nums;
     color: var(--h3-muted);
 }
+/* The chain is LONGER than the take. A chain shorter than the track is the
+ * normal case and stays muted; this is the one that raises at run time. */
+.h3e-trim-readout.h3e-trim-over { color: var(--h3-warn, #e0a030); }
 
 
 /* -- pinned RUN ----------------------------------------------------------

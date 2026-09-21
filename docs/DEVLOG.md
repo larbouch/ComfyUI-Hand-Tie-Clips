@@ -3688,3 +3688,310 @@ that were a missing frame sequence, a weak citation, a self-inflicted contradict
 conditioning imbalance. Nothing in the code was broken. Every one of them was legible from
 the log -- the caption line, the beat, the frame count -- and three of the four were found by
 reading it rather than by changing anything.
+
+
+## 70. The brief was over budget (2026-09-20)
+
+`CLAUDE.md` had grown to 66.9k characters, past the 40k the harness will load,
+so the file that is supposed to be read first had started to be truncated. The
+fix was not to decide what mattered -- it was to notice that two thirds of the
+overrun was *measurement record*, which is what this log is for, and that the
+brief had been carrying it because there was nowhere else to put it at the time.
+
+Moved here verbatim from CLAUDE.md, unedited. Each one left a condensed finding
+behind at its old site; what is below is the evidence for those findings, and
+where the two disagree the numbers here are the ones that were actually taken.
+
+Note these were written between 2026-08-26 and 2026-09-03 and sections 25, 53
+and 54 have since gone further on the tone and texture questions -- in
+particular the nine-hop study behind `tone_compensate=anchor`, which postdates
+every table below. Read them as the record of what was known then.
+
+### 70.1 Tone compensation, the three measurement blocks (2026-08-28)
+
+Was CLAUDE.md section 7, between the `tone_anchor_ref` note and the seam-probe
+warning.
+
+**Measured, 2026-08-28 — the real number, off the hop cache** (`chain_00052`, 3 hops x 243f, overlap 22, 7 steps res_multistep, Motion-Context pin on both joins). `tools/tone_probe.py` pairs hop N's last 22 frames with hop N+1's first 22 -- the model's regeneration of the same content, which survives only in the cache:
+
+| pair | r | g | b | luma |
+|---|---|---|---|---|
+| hop 1 -> 2 | +0.00995 | +0.00973 | +0.00914 | **+2.45/255** |
+| hop 2 -> 3 | +0.01003 | +0.01129 | +0.01085 | **+2.73/255** |
+| cumulative | +0.01998 | +0.02103 | +0.01999 | **+5.18/255** |
+
+Three facts follow, and they are the justification for the feature. It is **achromatic** -- r/g/b move together within ~0.001, so it is a luma bias, not a colour cast. It **accumulates linearly** -- ~2.5/255 per hop with nothing pulling it back, so a 5-hop chain lands near +10/255. And it is **brighter**, the opposite sign to the upstream README's "runs darker"; likely because we pin with a Motion-Context latent and never take the decode->encode round trip his workflow does.
+
+**Verified end to end, 2026-08-28** (seed `700637295460319`, `chain_00053` = `frame_shift`, `chain_00054` = `off`, both served from the same raw cache so content is identical):
+
+- **The mode is not in the hop key.** The `off` run hit all three keys written by the `frame_shift` run (`c442d296`, `4854c20f`, `2e4c1e14`) — 17.5 s against 171 s, zero re-renders. Switching modes costs nothing, which is the whole reason the call site sits after `hop_store.put`.
+- **Chain drift 5.57/255 -> 0.29/255**, a 95% reduction, and it stops accumulating. Applied shifts measured in the delivered video were `0`, `-1.71/255`, `-5.26/255`, matching the logged notes exactly. Segment 1 came out byte-identical, so hop 1's clamp was a no-op on this render.
+- **Do not use "seam -> 0" as the success metric.** It is wrong and it will make you overcorrect. Seam steps went `+1.40 -> -0.16` and `+1.41 -> -2.06`; the second is not an overshoot, it is the scene's own darkening across the cut, which correction should leave alone. The arithmetic closes: uncorrected seam minus true tone bias predicts `-0.31` and `-2.28` against measured `-0.16` and `-2.06`. Judge on cumulative drift, via `tone_probe`.
+- **Hop N needs a correction of N-1 times the per-hop bias** (hop 2 got `d`, hop 3 got `2d`), because `prev_sampled` — the Motion-Context latent the next hop is actually generated from — is never corrected. This is a pixel fix for a latent drift, so the required shift grows linearly: ~5/255 by hop 3, ~10/255 by hop 5, ~23/255 by hop 10. Since a positive drift is *subtracted*, the far-end failure is **crushed blacks** clipping at 0. Fine over the 3-5 hops this pack recommends; not a fix for long chains, and the first hard cost attached to the latent-mean gap below.
+- **Measured to hop 10, 2026-09-03 — linear through hop 4, then it plateaus.** The first 10-hop chain (243f, 1152x640, `frame_shift`, one run 14:24-14:51) logged r-channel seam corrections of `2.0, 4.1, 6.3, 14.9, 31.5, 28.2, 26.2, 29.4, 33.6` /255 for hops 2..10. Hops 2-4 land almost exactly on `(N-1) x 2.1`, which confirms the linear model above and the `~5/255 by hop 3` figure. Past that the test is confounded: the plan changes location at shot 6, the planner said so, and hop 5's anchor hit its cap — so the jump at hops 5-6 is the scene, not drift. What matters is what happened after: hops 7-10 sit flat at 26-34/255 rather than continuing to climb. **The predicted runaway to crushed blacks did not arrive by hop 10.** `~23/255 by hop 10` was an extrapolation and it under-called the middle and over-called the trend; treat the linear law as good to ~hop 4 and unproven, not disproven, beyond a scene change. Nobody has yet measured a 10-hop chain that holds one location, which is the run that would settle it.
+- **The per-frame drift is not flat across the overlap.** It ramps in over ~6 frames, plateaus, then dips sharply at frame 17 in *both* joins — likely a VAE temporal chunk boundary. `frame_shift` uses `drift[-1]`, which sits in that dip and under-corrects by ~0.38/255; the mean of the last 4 overlap frames would be marginally better and is the obvious tuning knob if the residual ever matters. Upstream's reason for `drift[-1]` (an exact internal join) does not apply here, because the master drops the overlap.
+
+**All three modes measured, 2026-08-28** (seed `700637295460319`, four masters over identical cached pixels: `chain_00054` off, `00053` frame_shift, `00055` gain_bias, `00056` lut):
+
+| mode | worst residual drift | dark-clipped px, seg 3 | notes |
+|---|---|---|---|
+| off | — | 0.32% | |
+| `frame_shift` | +0.38/255 | **0.96%** | `rx-0.0076`, then `-0.0207` |
+| `gain_bias` | **0.20/255** | 0.56% | `rx0.9854-0.0035`, then `rx0.9674-0.0071` |
+| `lut` | 0.27/255 | **0.07%** | mean `0.4372->0.4284`, then `0.4520->0.4291` |
+
+**On drift removal there is nothing to choose between them** -- all three land inside 0.4/255, below this measurement's noise. Pick on failure mode instead, and `frame_shift` wins on one argument: **every `gain_bias` slope came out below 1 and moving further away (0.985 -> 0.967), which is attenuation bias, not tone compression.** Fitting `s = A*g + C` where `g = s + delta + noise` yields `A = var(s)/(var(s)+var(noise)) < 1`, driven purely by content mismatch between the source and its regeneration. The drift is a *pure level shift* (r/g/b within 0.001), so any slope != 1 is fitting artifact, and it lands in the output as a contrast reduction that deepens along the chain. `lut` has the same defect with 64 free parameters per channel instead of one -- its dark clipping coming out *below* the uncorrected reference means it is reshaping the tone curve, not correcting level. `frame_shift` cannot make that class of error; it can only shift.
+
+The cost is `frame_shift`'s alone: **dark clipping tripled, 0.32% -> 0.96%**, because subtracting a flat 5.26/255 pushes near-black pixels through zero. That is the crushed-blacks endgame already visible at hop 3. A gain-only mode anchored at black (`out = g * mean(src)/mean(tgt)`, no bias term) would fix it without introducing a fitted slope, and is the obvious next mode if long chains ever need one.
+
+
+### 70.2 The first 8-step stress run, frame-walked (2026-08-26)
+
+Was the opening of CLAUDE.md's "First 8-step stress run". The shipped plan was
+s1 `says one short line` / s2 `still talking` + `join=continuous` `pan_follow`
+`keep` / s3 drink + `continuous` `push_in` `close` / s4 `match_cut` `pull_back`
+`wide`.
+
+4 hops × 8 s, seed 777777, turbo. Shipped plan: s1 `says one short line` / s2 `still talking` + `join=continuous` `pan_follow` `keep` / s3 drink + `continuous` `push_in` `close` / s4 `match_cut` `pull_back` `wide`.
+
+- **1→2 continuous + keep: clean.** The join directive is doing work; this is the success case.
+- **2→3 continuous + push_in + close: small jump.** `check_coherence` does **not** warn here (it only flags continuous + framing change + *held* camera). The jump is still expected at 8 steps: VOCAB concatenates “carry straight on from the pinned frames” with “A close shot, head and shoulders filling the frame,” so `framing: close` asserts the destination as the opening state while AddGuide is still the medium pin from s2. Next compiler pass should compose camera-move + framing as a *landing*, not as the opening, when `join=continuous`.
+- **3→4 match_cut: ok.** Control cut is distinguishable from 1→2. Do not treat all three seams as identical.
+- **Speech audio outlived the mouth.** s1–s2 ask for talking; s3–s4 do not (drink / lower mug). Picture followed the later beats (mouth busy, then quiet); soundtrack kept the line going for roughly the second half of the master. This is a pack gap, not a seam bug:
+  1. AddGuide pins the previous hop’s overlap **audio** at t=0 (`nodes_minimax_h3.py` crops it to remaining duration — the pin is ~0.9 s of *speech*, which seeds the rest of the hop).
+  2. cfg 1.0 cannot subtract speech. Omitting “talking” from s3/s4 is a no-op.
+  3. Shot-plan compilation emits no `overall_soundscape`. There is no speech/soundtrack axis on `AXES`.
+  4. `tail: ongoing` plus `_assemble_next`’s closer (“that action is still underway as the clip ends”) keep whatever the pin started, including a line.
+  5. s1’s “says one short line” names speech without giving the words, inside an 8 s hop. H3 invents a line and pads the leftover duration with more speech.
+  6. Vague leftover time is what H3 fills. User correction (2026-08-26): **every hop in a chain must carry either enough actual dialogue or a specific mention of silence.** Omitting both is gibberish, especially on hops 2+. “Says one short line” / “still talking” is vague and under-fills an 8 s hop. “No speech” / “no dialogue” is the negation form and also gibberish. The quiet word is **silence**, named in the beat. Spoken hops put the real words in the beat, enough to occupy the duration.
+- **End-of-run preview became the prompt dump.** `_push_preview(unique_id, info, …)` stuffed `info` into the status strip. Fixed to a short `done · Nf · Ts`; dump stays on the `info` output.
+- **Hop-1 compile order.** ~~`tail` sits before the beat~~ **Fixed.** `compile_shot` splits `lead` (join/camera/framing/pace) from `tail` and appends `tail` last, on hop 1 and hop 2+ alike (`directives.py`, `compile_shot`). Verified 2026-08-27. Two residuals survive: ESTABLISH still prepends “Live-action, natural light, one continuous take.” on hop 1 even when the beat already opens “Live-action…”, and a hop-1 beat that *is* a full six-field H3 block returns early and drops every directive including `tail`.
+
+
+### 70.3 chain_00030 / 00033 / 00034 -- three ways to re-open a generate
+
+Was CLAUDE.md, under the hop-2 contract.
+
+**chain_00030_.mp4 / chain_00031_.mp4 / the keyframe-completion re-queue.** Hard cut at hop 2, f124, onto the outfit still’s commercial kitchen. Drink beat ran; pin did not. Official hop 2 cannot join at 8 steps.
+
+**chain_00033_.mp4.** Short hop-2 drink beat, flatten did not fire (card was already short). Still hard-cut. Two findings: (1) `_assemble_next` still prepended register `subject_prose` (`subject_definitions:` + `retention_analysis:`), so hop 2 was a Ref2VA generate again. (2) Console: `8 steps euler/simple`, not `res_multistep/beta`. `tail: settle` also led the compiled beat, so hop 2 opened on “eases to a rest.” Header stripped; tail moved after the beat.
+
+**chain_00034_.mp4.** Header-stripped hop 2, `8 steps res_multistep/beta`. Still hard-cut; apron gone on hop 2. Console: `Qwen last frame -> <Picture 4>`, `3 identity stills`. Face still (`h3_stress_hero_face.jpg`) is the same commercial kitchen as the outfit plate, grey shirt, **no apron in the crop**. Outfit still has the apron. Hop 2 followed the face plate (place + wardrobe), not the pin. Stills without `shots` stay off hop 2+ continue; live frame is Picture 1.
+
+### 70.4 chain_00028 and chain_00029, frame-walked at 0.5 MP
+
+Was CLAUDE.md, under the iteration-canvas note.
+
+**chain_00028_.mp4 (0.5 MP, 960×544, 702 f / 29.25 s, 8 step).** Same stress plan. Frame-walked.
+
+- 1→2 at f192: continuous. Then **an inside-hop cut at f220–228 (~9.2–9.5 s, ~1.3 s after the join)** — over-shoulder + mug → frontal talking head, mug leaves frame. Same class as the old 1.8 s inside-hop cut. Shot 2’s `still talking` beat beat `pan_follow` + the walk.
+- 2→3 at f362: join itself is continuous (window, mug out). Close-up lands later inside hop 3 (~f432–456) on the drink, not at the seam.
+- 3→4 at f532: still the drink CU. `match_cut` + `wide` does **not** cut at the seam; pull-back to wide is ~f576–624. Control cut is late / soft.
+- Soundtrack is speech-level for almost the whole clip (integrated ~−11 LUFS). Brief dip at the 1→2 join; no quiet second half. Mouth can drink (f456–504) while the track keeps talking.
+- Mug survives hops 1, 3, 4; missing during the hop-2 talking-head. Identity holds at 0.5 MP (cross necklace from locked text rendered).
+- A/V: audio 29.131 s vs video 29.250 s (~119 ms short, ~40 ms × 3 hops).
+
+**chain_00029_.mp4 (0.5 MP, explicit beats + silence).** Same 702 f / 29.25 s.
+
+- Soundtrack: wall-to-wall speech is gone. Hop 1 line-burst ~4.4–7.3 s (mouth open at f120). **Random line at 15.41–16.71 s** (user-confirmed): 0.33 s after the 2→3 seam, 1.3 s of speech inside hop 3’s *kept* audio — the 0.9 s pin was already trimmed, so this is hop 3 inventing a line, not hop-2 leak. Hop 3 beat names Silence once, then “a swallow”, then `_assemble_next` still *ends* on “that action is still underway as the clip ends.” One silence mention in the middle of the prompt does not occupy an 8 s hop. Later hops also have a late spike (~23 s).
+- Mug path: chest height on the walk; lifts to the mouth only on hop 3; no reach to the glass. Opening frame still has the mug **on the counter** because the kitchen still itself shows it there (`h3_stress_kitchen.jpg`) — the photograph is additive, not only the desc.
+- 1→2 at f192: continuous, mug at chest. Camera swings toward the face ~f216 (mug stays). **Not** the 00028 talking-head cut.
+- Place break inside hop 2, f240→f270 (~10.0–11.25 s): residential window kitchen → the **outfit still’s commercial kitchen** (stainless, SANITIZER buckets, range). `h3_stress_hero_outfit.jpg` is that room. Kitchen ref is `retention: reference` (weak); outfit is a subject-bearing still of a *different set*. Walking off the pin lets the outfit photograph’s room take over. Hops 3–4 stay there. 2→3 join is continuous *in the wrong room*. 3→4 is again a delayed pull-back, not a match_cut at f532.
+
+### 70.5 The rest of the stress-run section
+
+Moved from `CLAUDE.md` in the same pass. The findings these support are now
+stated in the brief as bullets; this is the run-by-run form they were written in.
+
+### First 8-step stress run (user 2026-08-26)
+
+4 hops x 8 s, seed 777777, turbo, against the shipped kitchen plan. Six results
+still load-bearing; the frame-walk is **DEVLOG section 70.2**.
+
+- **`join=continuous` + `keep` joins cleanly.** The join directive does work.
+  Do not treat all three seams in a run as identical.
+- **`continuous` + a framing change jumps.** VOCAB concatenates "carry straight
+  on from the pinned frames" with the new framing, so the framing is asserted as
+  the *opening* state while the pin is still the old one. `check_coherence` does
+  not warn here -- it only flags a framing change with a *held* camera. The next
+  compiler pass should compose camera-move + framing as a **landing** rather
+  than as the opening when `join=continuous`.
+- **`match_cut` lands late and soft**, seconds inside the hop rather than at the
+  seam.
+- **Speech outlives the mouth.** The pin carries ~0.9 s of the previous hop's
+  speech, cfg 1.0 cannot subtract it, shot-plan compilation emits no
+  `overall_soundscape`, and `tail: ongoing` keeps whatever the pin started.
+  Omitting "talking" from a later shot is a no-op.
+- **Every hop must carry either enough real dialogue or a named silence**
+  (user, 2026-08-26). "Says one short line" under-fills an 8 s hop, so H3
+  invents one and pads the rest with more speech. "No speech" / "no dialogue"
+  is the negation form and is equally gibberish. The quiet word is **silence**,
+  named in the beat; spoken hops put the real words there.
+- **A photograph is additive, not only its description.** An opening frame put
+  the mug on the counter because the kitchen still shows it there.
+
+**Contract (confirmed 2026-08-26).** A complete six-field H3 / Ref2VA prompt is
+one generate, and `[Shot 1]` is the opening of *that* generate. Hop 1 may be
+official. **Hop 2+ must be a continuation beat only** -- pin-open + new action +
+sound. `compile_shot` / `_assemble_next` flatten an official hop 2+ block to
+action + `overall_soundscape` + `non_diegetic_music` and drop
+`subject_definitions` / `summary` / `retention_analysis` / a leading `[Shot 1]`.
+
+**Join pass (user 2026-08-27, `chain_00037_`).** Smooth chain, 2 hops, 8 steps
+`res_multistep/beta`, hop 2 `Qwen last frame -> <Picture 1>`, 0 identity stills,
+Motion-Context pin (22f picture, 24f audio), master 362 f / 15.1 s, all three
+stills `shots 1`. That is the working join recipe at 0.5 MP / 8 steps: latent pin
++ pin-only hop 2 + 8 s airlock budget + a hop-2 paragraph with no official
+fields. A native mask (Phase 2) is not needed for this seam.
+
+**Next tests** (pack, not kitchen beats):
+
+1. **Cache fingerprint.** LoRA strength 1.0 -> 0.9, re-queue; both hops re-render.
+   **ComfyUI's own node cache sits in front of this one:** re-queueing with
+   *nothing* changed skips `run()` entirely (no `[HandTieClips]` lines, ~9 s) and
+   tests nothing. Nudge `cache_budget_gb` to force re-execution -- it is in
+   neither `chain_salt` nor the hop key, so every key stays byte-identical.
+2. **Chained re-roll.** Revert strength, change one word in hop 2 only. Hop 1
+   hits, hop 2 renders.
+3. Confirm the same join at the top rung before calling it shipped.
+
+**Top rung verified (user, 2026-09-03).** `1344×768` from `768p (0.98 MP)` / `16:9 landscape`, 3 hops, **192f (8.0 s) each**, overlap 22f, 8 steps `er_sde`/`beta_57`, `hop_script=next`, `pin_to_qwen=last frame`. Joins judged good. ~2 min 15 s per hop on a 5090. This replaces `1280×736`, which 1.1 moved off and which had nothing behind it for the whole release until this run.
+
+Run that check at **8 s, not 5 s**: a top-rung join judged at 5 s tells you about
+the duration, not about the canvas.
+
+The three runs behind that contract are in **DEVLOG section 70.3**. Each found a
+different way to re-open a Ref2VA generate on hop 2 and hard-cut at f124 onto a
+reference's own room: wrapping hop 2 as a full official block, letting the
+register's `subject_prose` header through, and leaving an identity still riding
+hop 2 so the encoder followed the plate's place and wardrobe over the pin.
+
+**H3 soundtrack (official methods, user 2026-08-26):** do not invent a pack
+dialect for quiet vs speech. Dialogue belongs in `detailed_description` as `(S1)`
++ `<d>[English] ...</d>` with the actual words. Ambience / physical / non-verbal
+belong in `overall_soundscape`; requested silence throughout a hop is
+`overall_soundscape: N/A`, the official complete-silence token, not the English
+word "Silence" stuffed into a beat. `_assemble_next` does not emit these fields;
+when the beat already contains them, leave them alone.
+
+**Iteration canvas (user 2026-08-26):** further tests run at **512p**
+(`896x512` landscape) for speed. (1.1 computes the canvas from a short edge,
+mirroring core's `adapt_canvas`, so the rungs moved; `0.5 MP` still resolves --
+all fifteen 1.0.x cells are pinned -- but it is off the dropdown.) 8 steps, seed
+777777, 4 x 8 s, overlap 0.9 s. Resolution is in `chain_salt`, so the top-rung
+cache will not hit. A low-rung pass validates join / speech / cache behaviour,
+not full-resolution texture: confirm anything that ships at the top rung.
+
+Two 0.5 MP frame-walks, `chain_00028` and `chain_00029` (702 f / 29.25 s each),
+are in **DEVLOG section 70.4**. What they settled, beyond the bullets above: an
+inside-hop cut arrives ~1.3 s after a join when the beat fights the camera
+directive; a `retention: reference` place still loses to a subject-bearing still
+photographed in a *different* room, and once the chain walks off the pin into
+that room it stays there for every later hop; and audio runs ~40 ms short per
+hop against picture.
+
+## 71. three constants that were somebody else's widget (2026-09-20/21)
+
+Everything in 2.2.0. No GPU time was spent: all three are code-reading
+findings, and two of them were shipped wrong in 2.1.0 and passed every
+checker while being wrong.
+
+### 71.1 `refine_denoise=0.50` + `refine_steps=2` is a 4-step base
+
+`BasicScheduler(steps, denoise)` does not trim the hop's schedule. It builds
+an **independent** `int(steps / denoise)`-step grid on the model's own sigma
+transform and keeps the last `steps + 1` entries. At the published pair that
+is `int(2 / 0.50) = 4` -- a 4-step grid, whose last two sigmas the refine pass
+re-runs -- **whatever the hop actually sampled**. Refine a 10-step hop and the
+second pass lands on sigmas that hop never visited.
+
+That is the same failure shape as a hard-coded overlap: a default holding a
+literal that is really a function of another widget, right for exactly the
+configuration it was tuned on. It never raises. It reads, from outside, as
+"the refine lever does not do much."
+
+`refine_align` is the fix. `hop_tail` re-runs the hop's own last
+`refine_steps` sigmas, so the pass is aligned by construction at any step
+count. **The default stays `denoise`**, because a graph saved on 2.1.0 with
+refine on must reload on the schedule it rendered under -- changing it would
+silently re-render every refined hop on a different grid than the one whose
+output the user accepted. `hop_tail` arrives via the turbo preset only.
+
+### 71.2 `refine_blend="0:0, 22:0, 44:1"` -- the 22 is `overlap`
+
+The published ramp holds the blend at 0 for 22 frames and crosses over the 22
+after. That first 22 **is** the `overlap` widget: `OVERLAP_FRAMES` maps
+`0.9 s -> 22`, `0.2 s -> 5`, `1.6 s -> 39`. Only the 0.9 s setting was ever
+correct.
+
+- At **1.6 s** (39 f) the ramp starts crossing at frame 22, so frames 22-39
+  were refined **inside the pin** -- precisely the seam cost the hold exists
+  to remove.
+- At **0.2 s** (5 f) the hold ran 17 frames past the pin, discarding refined
+  frames that were sampled and paid for.
+
+`refine_blend=auto` (`refine_blend.resolve`) derives `0:0, {overlap}:0,
+{overlap + CROSS_FRAMES}:1` for this run. Two deliberate calls:
+
+- **The crossover width stays 22 and does not scale.** Only the *hold* is the
+  pin; the crossover is a taper length chosen for its own reasons, and
+  scaling it would be inventing a coupling the evidence does not show.
+- **`auto` resolves to a literal before the hop key is assembled**, so at the
+  shipped 22 f overlap it keys byte-identically to the old string and every
+  existing cached hop still hits. Same pattern as `pin_mech=auto`. The old
+  literal keeps working as an explicit override.
+
+### 71.3 what a `speed_mode` row is allowed to move
+
+`SPEED_MODES["turbo"]` carried `refine_head: "freeze"`. `refine_head` is a
+**measured drift lever** (freeze luma step 1.9x/1.7x against refine 3.5x/7.3x,
+`chain_00183` vs `00187`) -- so every turbo arm was also a `refine_head` arm,
+and `speed_mode` is deliberately absent from the hop key, so the key could not
+tell you which preset ran.
+
+Worse, the evidence for it was seam-side, and CLAUDE.md section 7 is explicit
+that a seam number is corroboration and never the decision. The only
+end-to-end validated turbo chain in hand -- the user's own 7-hop run -- used
+`refine_head=refine`. A preset contradicting the one configuration known to
+work is not a preset.
+
+It was removed, and the admission test written into the source beside the
+table: **a preset row may move a field only if that field is a property of the
+checkpoint in a stable way.** A distilled trunk really is only accurate at the
+sigmas it was distilled for, so `refine_align` qualifies. Sampler, scheduler
+and step count do not -- they turn over with every turbo release, and a
+stamping preset would overwrite a deliberate choice with this month's fashion.
+`SPEED_MODES` is therefore one row of one field, and that is the intended
+size.
+
+### 71.4 the checkers stayed green through a real corruption
+
+Writing `"auto"` into the Starter workflow by an index built from
+`INPUT_TYPES()` landed it on `refine_audio` instead -- ComfyUI inserts a
+hidden `control_after_generate` entry into `widgets_values` immediately after
+`seed`, so every index past `seed` is off by one. `tools/check_refine_keys.py`
+builds its own correct `expect` list, so it read the file correctly, compared
+against a correct expectation, **and the two errors cancelled**: a corrupted
+shipped artifact with a green suite.
+
+The lesson is not "add a check for that one field". It is that a checker which
+re-derives the index it is validating cannot catch an indexing bug. Workflow
+edits are now verified structurally against `git show HEAD:<file>` -- node
+ids, non-MODEL links, other nodes' widgets, and the named deltas -- and the
+diff output is not evidence, because the terminal's diff compressor mangles
+long `MarkdownNote` strings and reads as corruption when nothing is wrong.
+
+### 71.5 SLA to the front
+
+Both shipped workflows now run `UNETLoader -> H3SLAAttention ->
+LTX_lora_loader -> H3AdaLNLoRAFix -> MiniMaxLowVRAMAttention ->
+ModelPreviewOverrideKJ -> HTCH3Cache -> HandTieClips`, on PlagueKind's
+recommendation and confirmed against the user's own working turbo graph rather
+than inferred. SLA used to sit after low-VRAM; the note in CLAUDE.md claiming
+SLA's own docs put it last is reversed and dated.
+
+Every later patch, LoRA weights included, now lands on top of the attention
+override rather than under it. `tools/check_workflows.py` pins the order.
+Reordering patch nodes moves the keys `_model_fingerprint` hashes, so the
+first run after updating re-renders every hop even with `cache_hops=on` --
+the fingerprint working, not a regression, and the release note says so.

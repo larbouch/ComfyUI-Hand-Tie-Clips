@@ -714,6 +714,157 @@ def main():
        {r["tag"] for r in json.loads(stale)["refs"]} == {"ref_1", "ref_2"},
        stale[:120])
 
+    # -------------------------------------------------- the speech lint round
+    #
+    # The lint that matters most was the one the loop never mentioned. Short
+    # beats are warnings, not errors, because the node renders them happily --
+    # so `plan` used to accept on attempt 1 with a spare attempt in hand and
+    # hand back a hop of a visibly speaking character with three seconds of
+    # nothing assigned. Six live runs on 2026-09-18 did exactly that.
+    print()
+    print("planner.write_plan -- the speech lint spends one spare attempt")
+
+    def hops2(beat, refs_shots=(1, 2)):
+        return {"shots": [{"id": i + 1, "duration": "10 s", "beat": beat,
+                           "directives": {"camera": "hold",
+                                          "framing": "medium",
+                                          "pace": "steady",
+                                          "tail": "settle" if i else
+                                                  "ongoing"}}
+                          for i in range(2)]}
+
+    SP_REFS = {
+        "refs": [{"tag": "ref_1", "file": FILES[0], "slot": "identity",
+                  "subject": "1", "retention": "fully_preserved",
+                  "desc": "a character sheet of a young man in a grey jacket",
+                  "shots": [1, 2]}],
+        "subjects": {"1": {"name": "the young man",
+                           "locked": "the same face, short dark hair",
+                           "context": "a grey jacket over a white shirt"}}}
+    THIN = hops2(
+        "He walks down the narrow street, shoes loud on the wet asphalt, and "
+        "says 'Lora-Daddy is in town.' A vending machine hums behind him as "
+        "he passes the shuttered storefronts.")
+    FULL = hops2(
+        "Boots ring on wet asphalt as he walks. 'Lora-Daddy is in town, and "
+        "he is already getting things done before anyone else is awake.' He "
+        "steps around a leaning bicycle without slowing. 'Ask anyone on this "
+        "street and they will tell you exactly the same thing, every single "
+        "time you ask them.'")
+
+    def sp_write(fn):
+        return asyncio.run(
+            PL.write_plan("a man walks a japanese street", 2, complete_fn=fn,
+                          files=FILES, duration="10 s", use_schema=False))
+
+    _, thin_w = PL.validate(json.dumps(THIN), json.dumps(SP_REFS), hops=2,
+                            known_files=FILES, duration="10 s")
+    _, full_w = PL.validate(json.dumps(FULL), json.dumps(SP_REFS), hops=2,
+                            known_files=FILES, duration="10 s")
+    ck("the thin fixture is underwritten and still valid",
+       PL._speech_warnings(thin_w) and not PL._speech_warnings(full_w),
+       "%d thin / %d full" % (len(PL._speech_warnings(thin_w)),
+                              len(PL._speech_warnings(full_w))))
+
+    fn = scripted([fence(THIN, SP_REFS), fence(FULL, SP_REFS)])
+    out = sp_write(fn)
+    ck("an accepted but underwritten plan buys one more attempt",
+       out["ok"] is True and out["attempts"] == 2, str(out["attempts"]))
+    ck("the rewritten beats are what comes back",
+       "Boots ring" in (out["shot_plan"] or ""))
+    ck("and the lint is gone from the returned warnings",
+       PL._speech_warnings(out["warnings"]) == [],
+       "%d -> %d" % (len(PL._speech_warnings(thin_w)),
+                     len(PL._speech_warnings(out["warnings"]))))
+    sp_turn = str(fn.seen[1][-1]["content"])
+    ck("the warning text reached the model verbatim",
+       "spoken line(s)" in sp_turn)
+    ck("the turn says to keep the structure",
+       "do not restructure" in sp_turn.lower())
+    ck("the turn names the target in words, not lines",
+       "25 words" in sp_turn)
+    ck("the repair turn is text, not another pair of JPEGs",
+       isinstance(fn.seen[1][-1]["content"], str))
+
+    # The lint is advisory. Spending the budget arguing about it, or trading a
+    # plan the node accepts for one it does not, would both be worse than the
+    # short beat it set out to fix.
+    fn = scripted([fence(THIN, SP_REFS), "not a plan at all"])
+    out = sp_write(fn)
+    ck("a broken speech repair keeps the accepted plan",
+       out["ok"] is True and out["errors"] == [],
+       "; ".join(out["errors"][:1]))
+    ck("and keeps the accepted plan's own words",
+       "vending machine" in (out["shot_plan"] or ""))
+
+    fn = scripted([fence(THIN, SP_REFS), fence(THIN, SP_REFS),
+                   fence(FULL, SP_REFS)])
+    out = sp_write(fn)
+    ck("the round is spent once, not until the budget runs out",
+       len(fn.seen) == 2, "%d calls" % len(fn.seen))
+
+    fn = scripted([fence(FULL, SP_REFS)])
+    out = sp_write(fn)
+    ck("a plan with nothing to lint still costs one attempt",
+       out["attempts"] == 1 and len(fn.seen) == 1, str(out["attempts"]))
+
+    # --------------------------------------------------- the wordless hop
+    #
+    # SYSTEM_PROMPT has a wordless-hop rule -- zero spoken lines, no quotes,
+    # a named narrowband sound bed, "the spoken-lines column of the table does
+    # not apply" -- and until 2026-09-19 `validate` did not implement it. A
+    # quiet hop written exactly as the prompt asks still linted, and once the
+    # speech round went in that lint started SPENDING an attempt to push
+    # dialogue into it. Under master_audio_file that is the documented way to
+    # pull the mouth off a frozen take, so the exemption is load-bearing.
+    print()
+    print("planner.validate -- a wordless hop with a sound bed is not a lint")
+
+    BED = hops2(
+        "He walks the length of the platform without speaking, collar up "
+        "against the cold, hands pushed into his coat pockets. The hum of "
+        "the vending machine carries down the empty platform behind him, and "
+        "his footsteps come back off the tiled wall in a slow, even beat as "
+        "he passes each shuttered kiosk in turn.")
+    MUTE = hops2(
+        "He walks the length of the platform without speaking, collar up "
+        "against the cold, hands pushed into his coat pockets. He passes "
+        "each shuttered kiosk in turn, reading the closed signs one after "
+        "another, and does not slow down for any of them as the platform "
+        "empties out ahead of him and the last of the light goes.")
+
+    bed_e, bed_w = PL.validate(json.dumps(BED), json.dumps(SP_REFS), hops=2,
+                               known_files=FILES, duration="10 s")
+    mute_e, mute_w = PL.validate(json.dumps(MUTE), json.dumps(SP_REFS), hops=2,
+                                 known_files=FILES, duration="10 s")
+
+    def spoken_lints(ws):
+        return [w for w in ws if "spoken line(s)" in str(w)]
+
+    ck("a wordless hop naming a sound bed is valid", not bed_e,
+       "; ".join(str(e) for e in bed_e[:2]))
+    ck("and raises no spoken-lines lint", spoken_lints(bed_w) == [],
+       "; ".join(str(w) for w in spoken_lints(bed_w)[:1]))
+    # The exemption is the SOUND BED, not the silence. Zero lines and no bed
+    # is still the real defect -- that is the shape H3 fills with speech.
+    ck("a wordless hop with NO sound bed still lints",
+       len(spoken_lints(mute_w)) == 2,
+       "%d lint(s)" % len(spoken_lints(mute_w)))
+    ck("the word-count lint is untouched by the exemption",
+       not [w for w in bed_w if "the beat is" in str(w)],
+       "; ".join(str(w) for w in bed_w[:1]))
+    # The consequence that matters: no speech warning means write_plan has
+    # nothing to repair, so a deliberately quiet plan does not buy an extra
+    # attempt and does not get dialogue written into it.
+    ck("so the speech round is not spent on it",
+       PL._speech_warnings(bed_w) == [],
+       "%d" % len(PL._speech_warnings(bed_w)))
+    fn = scripted([fence(BED, SP_REFS)])
+    out = sp_write(fn)
+    ck("a wordless plan accepts on attempt 1",
+       out["ok"] is True and out["attempts"] == 1 and len(fn.seen) == 1,
+       "attempts=%s calls=%d" % (out["attempts"], len(fn.seen)))
+
     # ------------------------------------------------- the repair-turn schema
     print()
     print("planner._tighten_schema")

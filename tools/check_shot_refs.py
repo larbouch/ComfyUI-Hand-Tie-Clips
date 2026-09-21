@@ -117,6 +117,37 @@ def main():
     ck("the card has a refs field", 'el("span", null, "refs")' in js)
 
     print()
+    print("the continuity line names the relay lineage, not the register")
+    # `continuity_line` says "X continues, <wardrobe>" about each subject it is
+    # handed, on every continuation hop. cfg 1.0 has no negative branch, so
+    # every name in it is additive. Built from the register it was fine for a
+    # two-hander and rendered the entire cast standing in a row on an
+    # eight-character one -- seed-independently, because a register is not a
+    # seed. Comment lines are stripped below so the ones up here stay free to
+    # describe the broken form.
+    chain = os.path.join(HERE, "h3_ref_chain.py")
+    lines = [ln for ln in io.open(chain, encoding="utf-8").read().splitlines()
+             if not ln.strip().startswith("#")]
+    src = chr(10).join(lines)
+
+    at = [j for j, ln in enumerate(lines) if "_refs.continuity_line(" in ln]
+    ck("exactly one continuity_line call site", len(at) == 1)
+    if len(at) == 1:
+        call = " ".join(ln.strip() for ln in lines[at[0]:at[0] + 3])
+        ck("it is handed carried_subjects", "carried_subjects" in call)
+        #  is the guard and belongs there; what
+        # must not come back is the comprehension that walked the register.
+        ck("it is not handed the register",
+           "for r in ref_plan_refs" not in call)
+
+    ck("carried_subjects unions the pin's subjects on a continuation",
+       "hop_subjects | prev_subjects" in src)
+    ck("a chain start is handed nobody but its own",
+       "hop_subjects if hop_is_start" in src)
+    ck("prev_subjects starts empty", "prev_subjects = set()" in src)
+    ck("and is carried forward", "prev_subjects = carried_subjects" in src)
+
+    print()
     if FAIL:
         print("%d FAILURE(S): %s" % (len(FAIL), ", ".join(FAIL)))
         return 1

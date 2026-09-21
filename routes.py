@@ -102,6 +102,39 @@ def _pinned_refs(raw, limit):
     return out
 
 
+def _speed_mode_table():
+    """`SPEED_MODES`, flattened so every mode names every key any mode touches.
+
+    `SPEED_MODES["regular"]` is `{}` -- run() reads a missing key as "leave the
+    widget alone", which is right for a server-side override but wrong for a
+    panel that WRITES: picking turbo then regular would leave refine_head on
+    the turbo value with the dial claiming regular. So each mode is filled out
+    with the widget's own INPUT_TYPES default for anything it does not set, and
+    the editor stamps the row whole.
+
+    Served rather than retyped in JS for the reason the vocab route exists at
+    all: a second copy of the table is a second thing to get wrong, and this
+    one decides what renders.
+    """
+    from .h3_ref_chain import SPEED_MODES, HandTieClips
+    opt = HandTieClips.INPUT_TYPES().get("optional") or {}
+
+    def _default(name):
+        spec = opt.get(name)
+        return (spec[1] if spec and len(spec) > 1 else {}).get("default")
+
+    keys = sorted({k for row in SPEED_MODES.values() for k in row})
+    table = {}
+    for mode, row in SPEED_MODES.items():
+        filled = {}
+        for k in keys:
+            v = row.get(k, _default(k))
+            if v is not None:
+                filled[k] = v
+        table[mode] = filled
+    return table
+
+
 def _payload():
     from .h3_ref_chain import (
         ASPECTS, DURATION_FRAMES, OVERLAP_FRAMES, RESOLUTIONS, FPS, _canvas)
@@ -126,6 +159,9 @@ def _payload():
         "audio_exts": sorted(_media.AUDIO_EXTS),
         "ref_fields": list(_refs.REF_FIELDS),
         "subject_fields": list(_refs.SUBJECT_FIELDS),
+
+        # mode -> widget -> value the run panel stamps when you pick it.
+        "speed_modes": _speed_mode_table(),
 
         "durations": {k: v for k, v in DURATION_FRAMES.items()},
         "overlaps": {k: v for k, v in OVERLAP_FRAMES.items()},

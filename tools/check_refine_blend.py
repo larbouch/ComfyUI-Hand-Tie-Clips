@@ -154,6 +154,30 @@ def main():
     except ValueError as e:
         ck("a weight-count mismatch is refused", "refine_blend" in str(e))
 
+    print("\nauto: the ramp derives from THIS run's overlap")
+    ck("auto at the default 22 f overlap IS the published ramp",
+       rb.resolve("auto", 22) == rb.DEFAULT_RAMP,
+       "so a shipped workflow keys and renders exactly as it did at 2.1")
+    ck("auto holds raw across a 5 f pin, not a 22 f one",
+       rb.resolve("auto", 5) == "0:0, 5:0, 27:1",
+       "the literal would throw away 17 frames of refine it paid for")
+    ck("auto holds raw across a 39 f pin",
+       rb.resolve("auto", 39) == "0:0, 39:0, 61:1",
+       "the literal ships f22-f39 refined INSIDE the pin -- the seam cost back")
+    ck("the crossover width does not scale with the pin",
+       all(rb.parse(rb.resolve("auto", n))[2][0]
+           - rb.parse(rb.resolve("auto", n))[1][0] == rb.CROSS_FRAMES
+           for n in (5, 22, 39)),
+       "only the hold is overlap-coupled; nothing measured says the cross is")
+    ck("a literal ramp is passed through untouched",
+       rb.resolve(rb.DEFAULT_RAMP, 39) == rb.DEFAULT_RAMP,
+       "typing your own pairs overrides, at any overlap")
+    ck("empty still means 'no blend'",
+       rb.resolve("", 22) == "" and rb.parse(rb.resolve("", 22)) == [],
+       "the refine ships whole -- a real setting, not a missing value")
+    ck("case and spacing do not defeat it",
+       rb.resolve("  AUTO ", 22) == rb.DEFAULT_RAMP)
+
     print("\ndescribe")
     line = rb.describe(w, keys, "linear")
     ck("names the raw and refined counts", "raw" in line and "refined" in line,

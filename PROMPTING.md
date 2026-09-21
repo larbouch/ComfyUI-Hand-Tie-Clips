@@ -23,6 +23,52 @@ the live frame carried over from the previous hop, the join sentence, and the
 per-hop `<Picture N>` numbering. Your job is the **beat** — what happens this
 hop — plus the register that tells the node who is in it.
 
+### The shot fields at a glance
+
+The cards write this; you rarely see it. It is under **JSON** on the node if you
+want to copy a plan between workflows.
+
+```json
+{
+  "shots": [
+    {
+      "beat": "The cook stands at the counter, looks up, and speaks one short line.",
+      "directives": {"camera": "hold", "framing": "medium", "pace": "steady", "tail": "ongoing"}
+    },
+    {
+      "beat": "The cook sets the knife down and turns toward the window, still talking.",
+      "directives": {"join": "continuous", "camera": "push_in", "framing": "close"}
+    }
+  ]
+}
+```
+
+Shot 1 is the whole opening. Every later shot is **only the new beat** — the
+node supplies the identity lock, the live-frame citation and the join itself.
+Fields, all optional except `beat`:
+
+| | |
+|---|---|
+| `beat` | What happens this hop. |
+| `directives` | The five axes below. |
+| `prose` | Free text appended verbatim, for anything the vocabulary lacks. |
+| `seed`, `steps`, `duration` | Per-shot overrides. `duration` takes the widget's labels (`"8 s"`). |
+| `refs` | Which register stills ride this hop, as tags. Omit for the register default; `[]` is none; a list is those tags only, in that order. Unknown tags fail on the queue. |
+| `anchor` | `"restart"` makes this hop a chain start. See above. |
+| `tone` | `"free"` skips the chain-wide tone pull once; `"rebase"` also moves the anchor. |
+| `locked` | Reuse this shot's cached render even when its inputs changed. Needs `cache_hops=on` and a stable `id`. Not to be confused with `subjects.N.locked`, which is identity text. |
+| `id` | Stable name, used as the cache pointer. Generated if absent. |
+
+**Hops can differ in length.** `duration` is per shot and everything downstream
+sizes itself around it. Labels are the widget's — `5 s`, `7 s`, `8 s`, `10 s`,
+`15 s` — and that set is fixed, not arbitrary: every value has to land on H3's
+frame grid (`n % 17 == 5` at 24 fps), so there is no `6.5 s`. Editing one shot's
+length invalidates that hop and the hops after it, and nothing before it.
+
+**Short hops cut, long hops flow.** Overlap is chain-wide — 0.9 s by default —
+so a 5 s hop asking for `join: continuous` spends a fifth of itself on the
+airlock, and the node prints a note saying so.
+
 ---
 
 ## The three laws
@@ -247,6 +293,28 @@ prose, so the exact words carry all the weight.
 
 ## Directives
 
+### The axes at a glance
+
+| axis | options |
+|---|---|
+| `join` | `continuous`, `match_cut`, `hard_cut` — ignored on shot 1, which has nothing to join to |
+| `camera` | `hold`, `pan_follow`, `push_in`, `pull_back`, `orbit`, `handheld` |
+| `framing` | `keep`, `wide`, `medium`, `close` |
+| `pace` | `slow`, `steady`, `brisk` |
+| `tail` | `ongoing` (default), `settle`, `hold` |
+
+An unset axis emits nothing rather than asserting a default, so it costs no
+tokens. Everything is phrased affirmatively, for the reason in
+[the first law](#1-the-prompt-is-additive).
+
+`join=continuous` with a framing change and a held camera warns: with the camera
+still, the only way to reach a new framing is a cut. Earn it on the move, or use
+`framing: keep`. A camera move pointing the opposite way from the framing
+(`push_in` with `wide`, `pull_back` with `close`) warns too. When `continuous`
+and the camera *is* moving, the framing sentence compiles as a **landing** —
+"The move settles into a close shot…" — so it does not fight the pin that still
+holds the previous framing.
+
 Five axes, all optional. Set on a shot as `"directives": {...}`.
 
 | axis | values | notes |
@@ -332,6 +400,54 @@ rarely read the way you meant.
 ---
 
 ## The reference register
+
+### The register at a glance
+
+```json
+{
+  "refs": [
+    {"tag": "hero_face",   "file": "cook_face.jpg",   "subject": 1, "retention": "fully_preserved"},
+    {"tag": "hero_outfit", "file": "cook_apron.jpg",  "subject": 1, "retention": "partially_copy"},
+    {"tag": "kitchen",     "file": "kitchen_wide.jpg", "retention": "reference", "mp": 0.3}
+  ],
+  "subjects": {
+    "1": {"name": "the cook", "locked": "the same face, the same short dark hair"}
+  }
+}
+```
+
+`file` is a picture in `ComfyUI/input/h3_refs`, set by the rail. `tag` is what
+you write in beats, and the node resolves it to the right `<Picture N>` **per
+hop**, so pulling a still out of the middle no longer breaks every later
+reference.
+
+`subject` groups pictures per person. **This matters:** declaring every picture
+as a photo of `<Subject 1>` makes the model render the *average* of two
+different people.
+
+`retention` says how much of a picture carries over — `fully_preserved` (face
+and bone structure exactly), `partially_copy` (the garment and its cut),
+`reference` (layout, surfaces and light, i.e. a place). Refs with a subject
+default to `fully_preserved`; everything else defaults to `reference`.
+
+`mp` caps one picture's pixel budget in megapixels. It is a **token dial, not a
+quality one**: H3 turns every reference into pixel area ÷ 256 entries and
+attends over all of them on every step of every hop, so a location plate costing
+what a face costs is waste. A 0.3 MP place plate is ~1,170 tokens; a 2 MP
+portrait is ~7,800.
+
+> **The dial is inert at the default.** On `ref_image_size=match` every
+> reference is first scaled down to the output's pixel area, and `mp` only ever
+> caps *further* — so at 768p (~1.03 MP) the 1.5 and 2.0 settings change
+> nothing. The real per-reference resolution control is `ref_image_size=max`
+> **plus** `mp`, never `mp` on its own.
+
+Add `"shots": [1, 2]` to a ref to keep it out of the hops it does not belong in.
+On a continuation chain, omitting `shots` means **hop 1 only** — right for a
+place plate, which beats the pin if it rides a hop set somewhere else. **Put
+face plates on every hop:** a hop with no face reference comes back a different
+person and no later hop recovers. A shot's own `refs` overrides all of this for
+that one hop.
 
 ```json
 {
@@ -518,6 +634,35 @@ with: a quick beat takes a cut, a flowing take wants length. Give the short shot
 ---
 
 ## Read it before you render it
+
+### The flags at a glance
+
+`dry_run=on` compiles every hop's prompt and stops. No model, no sampler,
+seconds instead of minutes. The compiled text comes out on `info`, and as a
+readable page on `contact_sheet`. This is the only way to see what the text
+encoder will actually receive — the directive layer, the continuation
+scaffolding, the identity lock and the `<Picture N>` citations are all assembled
+at render time.
+
+![`lock` and the range button on the shot cards](https://media.githubusercontent.com/media/dntpi/ComfyUI-Hand-Tie-Clips/main/docs/img/shot-lock-range.png)
+
+`render_through=N` stops after N hops; with `cache_hops=on`, 3 → 5 → 8 builds a
+chain up in stages and only ever renders the new hops. The plan is not
+truncated: shot 4 still knows it is shot 4 and keys the same way it will in the
+full run.
+
+`quality=draft` forces the 448p tier and 6 steps. Treat it as a **fidelity**
+lever rather than a speed one — measured at ~42 s/hop against ~45 s/hop at 7
+steps, so if you already render at 448p and 6–8 steps it saves almost nothing
+and `dry_run` is the fast button. Draft earns its place when your final is
+genuinely heavier, 768p at 14 steps.
+
+`contact_sheet=on` adds an image on the fourth output: one row per hop, that
+hop's first and last **delivered** frame side by side, its beat, its directives,
+and what actually happened to it. On a chain of any length this is the fastest
+way to find the hop that broke.
+
+![Contact sheet](https://media.githubusercontent.com/media/dntpi/ComfyUI-Hand-Tie-Clips/main/docs/img/contact-sheet-vlog.png)
 
 Set `dry_run=on` and queue. Every hop's prompt compiles and the node stops —
 no model, no sampler, a few seconds. The text comes out on `info`, and the same

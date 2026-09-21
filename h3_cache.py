@@ -44,6 +44,8 @@ an exception. ``tools/check_h3_cache.py`` exists to make that failure loud:
 it diffs this file's segment-kind handling against Core's on every check run.
 Vendoring moved that watch from PlagueKind's repo to this one.
 
+BUFFER REUSE FROM PlagueKind v1.5.2 IS IN. Residual scratch is kept across reset()/finish() and overwritten in place; feature signatures live on CPU.
+
 THE cond_audio FIX IS ALREADY IN. PlagueKind's port dropped the ``cond_audio``
 segment kind, so ``seg_t[kind]`` raised ``KeyError: 'cond_audio'`` on any
 keyframe carrying an audio latent -- which is every hop of an audio chain. Core
@@ -97,10 +99,20 @@ class H3CacheState:
         self.device = device
         self.verbose = verbose
         self.total_steps = 1
+        # Long-lived residual scratch. Allocated on first store and reused in
+        # place; never freed from reset()/finish(). Ported from PlagueKind
+        # v1.5.2 -- freeing here can hit cuMemFreeAsync after Comfy tears down
+        # the block-stack malloc_scope="block" region.
+        self._residual_buffer: torch.Tensor | None = None
+        self._cache_valid = False
         self.reset()
 
     def reset(self) -> None:
-        self.cached_residual: torch.Tensor | None = None
+        # Do NOT free self._residual_buffer. reset() runs from finish()'s
+        # finally and on mid-run layout changes -- after prefetch's block
+        # malloc scope may already be gone. Mark the cache logically empty
+        # and keep the buffer for in-place copy_() on the next RUN.
+        self._cache_valid = False
         self.previous_feature_signature: torch.Tensor | None = None
         self.layout_signature: tuple[Any, ...] | None = None
         self.last_seen_timestep: float | None = None
@@ -145,8 +157,8 @@ class H3CacheState:
         if not signatures:
             stride = max(1, hidden_states.shape[0] // 100)
             sampled = hidden_states[::stride, :max_dim]
-            return sampled.detach().abs().mean(dim=-1).clone()
-        return torch.cat(signatures).clone()
+            return sampled.detach().abs().mean(dim=-1).float().cpu()
+        return torch.cat(signatures).float().cpu()
 
     @staticmethod
     def _timestep_value(timestep: Any) -> float | None:
@@ -158,21 +170,40 @@ class H3CacheState:
             return float(timestep)
         return None
 
+    @property
+    def cached_residual(self) -> torch.Tensor | None:
+        return self._residual_buffer if self._cache_valid else None
+
     def _store_residual(self, residual: torch.Tensor) -> None:
         if self.device == "cuda" and residual.device.type != "cuda":
             raise ValueError(
                 "H3 MiniMax Cache device is set to cuda, but the model is not running on CUDA."
             )
 
+        target_device = torch.device("cpu") if self.device == "cpu" else residual.device
+        residual = residual.detach()
         try:
-            if self.device == "cpu":
-                self.cached_residual = residual.detach().to("cpu", copy=True)
-            else:
-                self.cached_residual = residual.detach().clone()
+            buf = self._residual_buffer
+            # In-place overwrite of a stable buffer -- never free+realloc on
+            # every RUN step (PlagueKind v1.5.2). Realloc only on first store
+            # or shape/dtype/device change after a layout reset.
+            if (
+                buf is None
+                or buf.shape != residual.shape
+                or buf.dtype != residual.dtype
+                or buf.device != target_device
+            ):
+                self._residual_buffer = torch.empty(
+                    residual.shape, dtype=residual.dtype, device=target_device
+                )
+                buf = self._residual_buffer
+            buf.copy_(residual, non_blocking=(target_device.type == "cuda"))
+            self._cache_valid = True
         except torch.OutOfMemoryError:
             if self.device == "cuda":
                 raise
-            self.cached_residual = residual.detach().to("cpu", copy=True)
+            self._residual_buffer = residual.to("cpu", copy=True)
+            self._cache_valid = True
 
     def _apply_residual(self, hidden_states: torch.Tensor) -> torch.Tensor:
         residual = self.cached_residual
@@ -258,7 +289,7 @@ class H3CacheState:
 
         self.run_count += 1
         self.consecutive_skips = 0
-        self.cached_residual = None
+        self._cache_valid = False
         self.previous_feature_signature = self._feature_signature(hidden_states, cache_ranges)
         start_hidden_states = hidden_states.clone()
         result = original_block(args)

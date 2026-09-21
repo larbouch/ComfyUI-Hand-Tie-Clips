@@ -121,8 +121,19 @@ function viewUrl(name) {
  * @param get       () => ({start, end}) in seconds. end 0 = to the end.
  * @param set       (start, end) => void.
  * @param onChange  called after a committed drag.
+ * @param span      () => seconds, or 0/absent for the normal two-grip trim.
+ *
+ * FIXED-WIDTH MODE (`span`). The master audio window is not a trim: its width
+ * is the chain itself -- duration x shots - overlap -- so the only thing to
+ * choose is where it opens. Two grips would offer an OUT that silently does
+ * nothing, so in this mode the OUT grip is hidden, the box is dragged bodily,
+ * and the readout names the chain length rather than the window length. The
+ * width is read live on every paint: changing `duration`, `overlap` or the
+ * shot count resizes the box under your cursor, which is the whole point of
+ * drawing it here instead of printing a number somewhere else.
  */
-export function createTrimBar({ kind = "audio", name, get, set, onChange } = {}) {
+export function createTrimBar({ kind = "audio", name, get, set, onChange,
+                                span } = {}) {
     const root = el("div", "h3e-trimwrap");
 
     const bar = el("div", "h3e-trim");
@@ -131,11 +142,13 @@ export function createTrimBar({ kind = "audio", name, get, set, onChange } = {})
     const maskL = el("div", "h3e-trim-mask l");
     const maskR = el("div", "h3e-trim-mask r");
     const head = el("div", "h3e-trim-head");
+    const winBox = el("div", "h3e-trim-win");
     const gripI = el("div", "h3e-trim-grip in");
     const gripO = el("div", "h3e-trim-grip out");
     gripI.title = "Drag: where the window starts.";
     gripO.title = "Drag: where the window ends.";
-    bar.append(maskL, maskR, head, gripI, gripO);
+    winBox.title = "Drag: slide the chain's window along the take.";
+    bar.append(maskL, maskR, winBox, head, gripI, gripO);
     root.appendChild(bar);
 
     const media = el(kind === "video" ? "video" : "audio", "h3e-trim-media");
@@ -152,8 +165,21 @@ export function createTrimBar({ kind = "audio", name, get, set, onChange } = {})
     let loaded = "";         // which file the element currently holds
     let raf = 0;
     let dragging = null;
+    let grabDx = 0;          // fixed-width mode: cursor offset inside the box
 
-    const outOf = () => (b > 0 ? Math.min(b, secs) : secs);
+    /** Window width in seconds, or 0 when this is an ordinary two-grip trim. */
+    const spanOf = () => {
+        const v = Number(span?.() ?? 0);
+        return Number.isFinite(v) && v > 0 ? v : 0;
+    };
+    /** Latest IN that still fits the whole window. */
+    const maxStart = () => Math.max(0, secs - spanOf());
+
+    const outOf = () => {
+        const sp = spanOf();
+        if (sp > 0) return Math.min(secs, a + sp);
+        return b > 0 ? Math.min(b, secs) : secs;
+    };
 
     function pct(t) {
         return secs > 0 ? Math.max(0, Math.min(100, (t / secs) * 100)) : 0;
@@ -163,16 +189,35 @@ export function createTrimBar({ kind = "audio", name, get, set, onChange } = {})
      *  structure -- rebuilding mid-drag would destroy the captured element and
      *  the drag would die halfway. */
     function paintGrips() {
+        const sp = spanOf();
         const pa = pct(a);
         const pb = pct(outOf());
         maskL.style.width = `${pa}%`;
         maskR.style.width = `${100 - pb}%`;
         gripI.style.left = `${pa}%`;
         gripO.style.left = `${pb}%`;
-        const span = Math.max(0, outOf() - a);
-        readout.textContent = secs > 0
-            ? `in ${fmt(a)}   out ${b > 0 ? fmt(b) : "end"}   (${fmt(span)} of ${fmt(secs)})`
-            : "";
+        gripO.style.display = sp > 0 ? "none" : "";
+        winBox.style.display = sp > 0 ? "" : "none";
+        winBox.style.left = `${pa}%`;
+        winBox.style.width = `${Math.max(0, pb - pa)}%`;
+        if (!(secs > 0)) { readout.textContent = ""; return; }
+        if (sp > 0) {
+            // A chain SHORTER than the take is the normal case, not a fault:
+            // hop lengths are quantised, so a chain length is almost never a
+            // track length. Only the direction that RAISES is worth a flag.
+            const over = sp > secs + 0.02;
+            const spare = secs - sp;
+            readout.textContent =
+                `opens ${fmt(a)}   chain ${fmt(sp)} of ${fmt(secs)}`
+                + (over ? `   -- ${fmt(sp - secs)} longer than the take`
+                    : (spare >= 0.05 ? `   (${fmt(spare)} unused)` : ""));
+            readout.classList.toggle("h3e-trim-over", over);
+            return;
+        }
+        readout.classList.remove("h3e-trim-over");
+        const width = Math.max(0, outOf() - a);
+        readout.textContent =
+            `in ${fmt(a)}   out ${b > 0 ? fmt(b) : "end"}   (${fmt(width)} of ${fmt(secs)})`;
     }
 
     let lastPeaks = null;
@@ -229,6 +274,9 @@ export function createTrimBar({ kind = "audio", name, get, set, onChange } = {})
             e.preventDefault();
             e.stopPropagation();
             dragging = which;
+            // Grab the box where it was actually clicked, so it does not snap
+            // its own left edge under the cursor on the first pointermove.
+            grabDx = which === "win" ? seek(e.clientX) - a : 0;
             e.target.setPointerCapture?.(e.pointerId);
         };
     }
@@ -236,10 +284,35 @@ export function createTrimBar({ kind = "audio", name, get, set, onChange } = {})
     function onMove(e) {
         if (!dragging) return;
         const t = seek(e.clientX);
-        if (dragging === "in") a = Math.min(t, outOf() - MIN_WINDOW_S);
-        else b = Math.max(t, a + MIN_WINDOW_S);
-        a = Math.max(0, a);
+        const sp = spanOf();
+        if (sp > 0) {
+            a = Math.max(0, Math.min(maxStart(),
+                                     t - (dragging === "win" ? grabDx : 0)));
+        } else if (dragging === "in") {
+            a = Math.max(0, Math.min(t, outOf() - MIN_WINDOW_S));
+        } else {
+            b = Math.max(t, a + MIN_WINDOW_S);
+            a = Math.max(0, a);
+        }
         paintGrips();
+    }
+
+    /** Store a window, then adopt back whatever was actually stored.
+     *
+     *  A widget quantises on write. A FLOAT declaring `step: 0.1` rounds 4.03
+     *  to 4.00, so the drag position and the stored value are not the same
+     *  number, and painting from the drag position prints a figure the node
+     *  never receives. That was measured, not theorised: a master-audio window
+     *  dragged to a readout of 4.03 s opened the take at 4.00 s, 1440 samples
+     *  -- 30 ms -- earlier than the panel claimed, confirmed by correlating the
+     *  render against the source take. Reading the value back makes the readout
+     *  honest whatever step the widget happens to declare, which is the part
+     *  that has to hold even if a step is changed again later. */
+    function commit(start, end) {
+        set?.(start, end);
+        const back = get?.() || {};
+        a = Math.max(0, Number(back.start) || 0);
+        b = Math.max(0, Number(back.end) || 0);
     }
 
     function onUp(e) {
@@ -247,18 +320,26 @@ export function createTrimBar({ kind = "audio", name, get, set, onChange } = {})
         const was = dragging;
         dragging = null;
         e.target.releasePointerCapture?.(e.pointerId);
-        // Snap OUT back to the sentinel when it is at the end, so replacing the
-        // file with a longer one still plays to ITS end rather than being
-        // silently truncated at the old file's length.
-        if (was === "out" && b >= secs - 0.05) b = 0;
-        set(Math.round(a * 100) / 100, b > 0 ? Math.round(b * 100) / 100 : 0);
+        if (spanOf() > 0) {
+            // No OUT to store: the width is the chain, and writing an end here
+            // would pin the window to today's shot count.
+            commit(Math.round(a * 100) / 100, 0);
+        } else {
+            // Snap OUT back to the sentinel when it is at the end, so replacing
+            // the file with a longer one still plays to ITS end rather than
+            // being silently truncated at the old file's length.
+            if (was === "out" && b >= secs - 0.05) b = 0;
+            commit(Math.round(a * 100) / 100,
+                b > 0 ? Math.round(b * 100) / 100 : 0);
+        }
         paintGrips();
         onChange?.();
     }
 
     gripI.addEventListener("pointerdown", onDown("in"));
     gripO.addEventListener("pointerdown", onDown("out"));
-    for (const g of [gripI, gripO]) {
+    winBox.addEventListener("pointerdown", onDown("win"));
+    for (const g of [gripI, gripO, winBox]) {
         g.addEventListener("pointermove", onMove);
         g.addEventListener("pointerup", onUp);
         g.addEventListener("pointercancel", onUp);
@@ -284,11 +365,18 @@ export function createTrimBar({ kind = "audio", name, get, set, onChange } = {})
      *  committed values mid-pointer would fight the grip. */
     function adoptWindow() {
         if (dragging || !(secs > 0)) return;
+        if (spanOf() > 0) {
+            // Clamp only. A window that no longer fits -- a longer chain, or a
+            // shorter replacement file -- slides back to the latest start that
+            // does, rather than resetting to 0 and losing the cue you found.
+            const want = Math.max(0, Math.min(maxStart(), a));
+            if (Math.abs(want - a) < 0.005) return;
+            commit(Math.round(want * 100) / 100, 0);
+            return;
+        }
         const fitted = storedWindow(a, b, secs);
         if (fitted.start === a && fitted.end === b) return;
-        a = fitted.start;
-        b = fitted.end;
-        set?.(a, b);
+        commit(fitted.start, fitted.end);
     }
 
     function render() {
