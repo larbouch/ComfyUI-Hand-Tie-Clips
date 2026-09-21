@@ -1,7 +1,7 @@
 # Hand Tie Clips v2 — handback
 
-**Claude: start at `GROK_TO_CLAUDE.md` (Desktop and `docs/`). This file is
-the writing record.** Remaining GPU work is tests **3–5**.
+**This file is the writing record.** Its companion pickup note was removed
+from the repo on 2026-09-22; what it asked for is done. Remaining GPU work is tests **3–5**.
 
 Branch `v2` at `D:\ComfyUI\custom_nodes\ComfyUI-Hand-Tie-Clips`. Committed,
 **unpushed**. Head **`d0ba7af`**. `check_all.py`: 22 checks, all green after
@@ -246,4 +246,4 @@ shipped; test 4 is the length check.
 ## 7. GPU tests
 
 `GROK_V2_GPU_TESTS.md` (Desktop and `docs/`). Tests 1–2 done. Claude
-runs 3–5. Pickup: `GROK_TO_CLAUDE.md`.
+runs 3–5.
